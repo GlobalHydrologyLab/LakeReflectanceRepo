@@ -1,0 +1,380 @@
+---
+title: "01_PullMunge"
+author: "Simon Topp"
+date: "6/29/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(purrr)
+library(furrr)
+library(data.table)
+library(feather)
+
+source('00_Functions.R')
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Read in the data and aggregate some initial stats to see how many observations
+we pulled.
+
+```{r eval = F}
+files <- list.files('data/raw', full.names = T)
+files <- files[file.size(files) > 1] ## 6 WRS tile returned no values
+
+## Just look how many obs per lake we're getting  
+pullStats <- function(file){
+  df <- read_csv(file) %>%
+    group_by(Hylak_id) %>%
+    summarize(count = n())
+  return(df)
+}
+
+## Do it all in parallel because it takes awhile with ~30 million obs
+plan(multiprocess)
+stats <- files %>% future_map_dfr(pullStats, .progress = T)
+plan(sequential)
+
+stats.agg <- stats %>%
+  group_by(Hylak_id) %>%
+  summarize(tiles = n(),
+            obs = sum(count))
+
+meanObs <- mean(stats.agg$obs)
+medObs <- median(stats.agg$obs)
+```
+
+# Looks like we have a mean of `r meanObs` observations and median of `r medObs` obeservations per lake in hydrolakes
+
+```{r}
+ggplot(stats.agg, aes(x = obs, fill = factor(tiles))) + 
+  geom_histogram() + 
+  scale_fill_viridis_d() +
+  theme_bw() +
+  labs()
+```
+
+## Do a conservative munge on the dataset to reduce the noise
+
+```{r eval = F}
+## Munge it conservatively, basically no hillshade, zero clouds/shadow/ice and
+## at least 8 pixels
+## at the same time extract the date and Landsat ID to join with the metadata
+munger <- function(file){
+  df <- read_csv(file) %>%
+    filter(!is.na(Blue),
+           hillShadow == 1,
+           cScore_clouds == 0,
+           pCount_dswe1 > 8) %>%
+    mutate(LandsatID = map_chr(`system:index`, ~str_split(.,'_0000')[[1]][1]),
+         date =  map_chr(LandsatID, ~tail(strsplit(., "_")[[1]], n =1)),
+         date = ymd(date)) %>%
+  select(-`system:index`)
+  return(df)
+}
+
+## Again, do it all in Parallel
+plan(multiprocess)
+munged <- files %>% future_map_dfr(munger, .progress = T)
+plan(sequential)
+
+## Save the output
+write_csv(munged, 'data/sr_us_hydrolakes_dp_20200628.csv')
+write_feather(munged, 'data/sr_us_hydrolakes_dp_20200628.feather')
+```
+
+
+```{r}
+munged <- read_feather('data/sr_us_hydrolakes_dp_20200628.feather')
+## Look at new post-munged values
+summary <- setDT(munged)[,.N,.(Hylak_id)]
+
+postMungeMean <- mean(summary$count)
+postMungeMed <- median(summary$count)
+
+ggplot(stats.agg, aes(x = obs, fill = factor(tiles))) + 
+  geom_histogram() + 
+  scale_fill_viridis_d() +
+  theme_bw() +
+  labs()
+```
+
+# After munging, we have  a mean of `r postMungeMean` observations and median of `r postMungeMed` obeservations per lake in hydrolakes.  Now join the data to the metadata and look at potential biases between sensors.
+
+```{r}
+meta <- read_csv('data/SceneMetadata.csv')
+meta <- meta %>% rename(LandsatID = `system:index`)
+
+refCompPre <- munged %>%
+  left_join(meta %>% select(LandsatID, sat = SATELLITE)) %>%
+  select(date, Blue, Red, Green, Nir, TIR1, sat, pCount_dswe1, pCount_dswe3) 
+
+refCompPre <- as.data.table(refCompPre)[, year := year(date)
+               ][, week := week(date)
+                 ][, month := month(date)
+                   ][,period :=cut (year, 6)
+                    ][,dWLPre := fui.hue(Red, Green, Blue)
+                     ][,sat := factor(sat, levels = c('LANDSAT_5','LANDSAT_7','LANDSAT_8'),
+                      labels = c('l5','l7','l8'))]
+
+
+lm8 <- function(band){
+  y <- refCompPre %>% 
+    filter(year > 2012, sat == 'l7') %>% 
+    .[,band] %>% 
+    quantile(., seq(.01,.99, .01))
+  
+  x = refCompPre %>% 
+    filter(year > 2012, sat == 'l8') %>% 
+    .[,band] %>% 
+    quantile(., seq(.01,.99, .01))
+  
+  lm <- lm(y~poly(x, 2, raw = T))
+  
+  df <- tibble(band = band, intercept = lm$coefficients[[1]], B1 = lm$coefficients[[2]], B2 = lm$coefficients[[3]])
+  #lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
+  return(df)
+}
+
+lm5 <- function(band){
+  y <- refCompPre %>% 
+    filter(year > 1999, year < 2012, sat == 'l7') %>% 
+    .[,band] %>% 
+    quantile(., seq(.01,.99, .01))
+  
+  x = refCompPre %>% 
+    filter(year > 1999, year < 2012, sat == 'l5') %>% 
+    .[,band] %>% 
+    quantile(., seq(.01,.99, .01))
+  
+  lm <- lm(y~poly(x, 2, raw = T))
+  
+  df <- tibble(band = band, intercept = lm$coefficients[[1]], B1 = lm$coefficients[[2]], B2 = lm$coefficients[[3]])
+  #lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
+  return(df)
+}
+
+# lm8 <- function(band, x){
+#   x <- x %>% filter(year > 2012)
+#   df <- tibble(l7 = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+#                              seq(.01,.99, .01)), 
+#                l8 = quantile(x %>% filter(sat == 'l8') %>% .[,band], 
+#                              seq(.01,.99, .01)))
+#   lm <- lm(l7~poly(l8, 2), data = df)
+#   #lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
+#   return(lm)
+# }
+# 
+# lm5 <- function(band, x){
+#   x <- x %>% filter(year > 1999, year < 2012) 
+#   df <- tibble(l7 = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+#                              seq(.01,.99, .01)), 
+#                l5 = quantile(x %>% filter(sat == 'l5') %>% .[,band], 
+#                              seq(.01,.99, .01)))
+#   lm <- lm(l7~poly(l5, 2), data = df)
+#   return(lm)
+# }
+
+## Create the functions and look at the resulting corrections
+bands <-  c('Blue', 'Green', 'Nir', 'Red', 'TIR1')
+funcs.8 <- bands %>% map_dfr(lm8)
+funcs.5 <- bands %>% map_dfr(lm5)
+# 
+# funcs.5 <- bands %>%
+#   mutate(lm5 = purrr::map(band, lm5, x = refCompPre))
+
+
+save(funcs.8, funcs.5, file = 'models/landsat_poly_corrs.Rdata')
+
+
+##Check out the resulting corrections a little
+# Landsat 5 comparisons
+correctionPlot('Blue', 'l5')
+correctionPlot('Green', 'l5')
+correctionPlot('Red', 'l5')
+correctionPlot('TIR1','l5')
+
+# Landsat 8 comparisons
+correctionPlot('Blue', 'l8')
+correctionPlot('Green', 'l8')
+correctionPlot('Red', 'l8')
+correctionPlot('TIR1','l8')
+
+# DWL comparions (not final corrected values)
+correctionPlot('dWLPre', 'l5')
+correctionPlot('dWLPre', 'l8')
+```
+
+## We see some significant differences, especially between 7 and 8.  When we look at how this translates to dominant wavelength it's apparent we need to standardize the reflectance values between sensors a little. To do so we'll apply the functions created above to the entire dataset
+
+```{r}
+## Not sure how to do if else statemtns with data.table, so we'll put it in parallel
+## and map it
+
+l5corr <- refCompPre[sat == 'l5'
+                     ][,Blue := funcs.5[1,2][[1]] +
+                                      funcs.5[1,3][[1]]*Blue +
+                                      funcs.5[1,4][[1]]*Blue^2
+                       ][,Green := funcs.5[2,2][[1]] + 
+                         funcs.5[2,3][[1]]*Green + 
+                         funcs.5[2,4][[1]]*Green^2
+                         ][,Nir := funcs.5[3,2][[1]] + 
+                          funcs.5[3,3][[1]]*Nir + 
+                          funcs.5[3,4][[1]]*Nir^2
+                          ][,Red := funcs.5[4,2][[1]] + 
+                          funcs.5[4,3][[1]]*Red + 
+                          funcs.5[4,4][[1]]*Red^2
+                          ][,TIR1 := funcs.5[5,2][[1]] + 
+                          funcs.5[5,3][[1]]*TIR1 + 
+                          funcs.5[5,4][[1]]*TIR1^2]
+
+l8corr <- refCompPre[sat == 'l8'
+                     ][,Blue := funcs.8[1,2][[1]] +
+                                      funcs.8[1,3][[1]]*Blue +
+                                      funcs.8[1,4][[1]]*Blue^2
+                       ][,Green := funcs.8[2,2][[1]] + 
+                         funcs.8[2,3][[1]]*Green + 
+                         funcs.8[2,4][[1]]*Green^2
+                         ][,Nir := funcs.8[3,2][[1]] + 
+                          funcs.8[3,3][[1]]*Nir + 
+                          funcs.8[3,4][[1]]*Nir^2
+                          ][,Red := funcs.8[4,2][[1]] + 
+                          funcs.8[4,3][[1]]*Red + 
+                          funcs.8[4,4][[1]]*Red^2
+                          ][,TIR1 := funcs.8[5,2][[1]] + 
+                          funcs.8[5,3][[1]]*TIR1 + 
+                          funcs.8[5,4][[1]]*TIR1^2]
+
+srCor <- refCompPre %>%
+  filter(sat == 'l7') %>%
+  bind_rows(l5corr) %>%
+  bind_rows(l8corr)
+
+write_feather(srCor, 'data/srCorrected_us_hydrolakes_dp_20200628.feather')
+```
+
+# Squash it a bit
+
+```{r}
+sub <- munged %>% sample_frac(.01) %>% as.data.table()
+cols <- names(sub)
+
+smashed <- as.data.table(munged)[, year := year(date)
+               ][, week := week(date)
+                 ][,period :=cut (year, 6)
+                   ][,dWL := fui.hue(Red, Green, Blue)
+                     ][, .(medWl = median(dWL),
+                           sdWl = sd(dWL), 
+                           dswe1 = mean(pCount_dswe1),
+                           dswe3 = mean(pCount_dswe3),
+                           medTir = median(TIR1),
+                           sdTir = sd(TIR1),
+                           nObs = .N), 
+                       by = .(period,week, Hylak_id)]
+
+smashedMonth <- as.data.table(srCor)[,dWL := fui.hue(Red, Green, Blue)
+                     ][, .(medWl = median(dWL),
+                           sdWl = sd(dWL), 
+                           dswe1 = mean(pCount_dswe1),
+                           dswe3 = mean(pCount_dswe3),
+                           medTir = median(TIR1),
+                           sdTir = sd(TIR1),
+                           nObs = .N), 
+                       by = .(period,month)]
+
+
+weekCount <- smashed[,.N, .(Hylak_id, period)]
+
+idSamp <- unique(smashed$Hylak_id) %>%
+  sample(20)
+
+smashed %>% filter(Hylak_id %in% idSamp) %>%
+  mutate(periodNum = as.numeric(period)) %>%
+  ggplot(., aes(x = week, y = medWl, color = periodNum, group = periodNum)) + geom_line() +
+  scale_color_viridis_c() +
+  facet_wrap(~Hylak_id, scales = 'free')
+
+smashed %>% filter(week > 15 & week  < 45) %>%
+  ggplot(., aes(x = period, y = medWl)) + geom_violin(draw_quantiles = .5) +
+  facet_wrap(~week)
+
+
+smashedMonth %>% 
+  ggplot(., aes(x = period, y = medWl)) + geom_violin(draw_quantiles = .5) +
+  facet_wrap(~month)
+
+
+```
+
+
+## Including Plots
+
+```{r pressure, echo=FALSE}
+
+
+
+```
+
+
+```{r}
+refCompPre <- munged %>%
+  filter(date > '1999-01-01') %>%
+  #sample_frac(.3) %>%
+  left_join(meta %>% select(LandsatID, sat = SATELLITE)) %>%
+  mutate(dWL = fui.hue(Red, Green, Blue),
+         year = year(date),
+         sat = factor(sat, levels = c('LANDSAT_5','LANDSAT_7','LANDSAT_8'), 
+                      labels = c('l5','l7','l8'))) %>%
+  select(year, Blue, Red, Green, Nir, dWL, sat)
+
+
+
+## Create functions for calculating the polynomial regression equation
+lm8 <- function(band, x){
+  x <- x %>% filter(year > 2012)
+  df <- tibble(l7 = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+                             seq(.01,.99, .01)), 
+               l8 = quantile(x %>% filter(sat == 'l8') %>% .[,band], 
+                             seq(.01,.99, .01)))
+  lm <- lm(l7~poly(l8, 2), data = df)
+  #lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
+  return(lm)
+}
+
+lm5 <- function(band, x){
+  x <- x %>% filter(year > 1999, year < 2012) 
+  df <- tibble(l7 = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+                             seq(.01,.99, .01)), 
+               l5 = quantile(x %>% filter(sat == 'l5') %>% .[,band], 
+                             seq(.01,.99, .01)))
+  lm <- lm(l7~poly(l5, 2), data = df)
+  return(lm)
+}
+
+
+bands <- tibble(band = c('Blue', 'Green', 'Nir', 'Red')) 
+funcs.8 <- bands %>%
+  mutate(lm8 = purrr::map(band, lm8, x = refCompPre))
+funcs.5 <- bands %>%
+  mutate(lm5 = purrr::map(band, lm5, x = refCompPre))
+
+save(funcs.8, funcs.5, file = 'models/landsat_poly_corrs.Rdata')
+
+
+##Check out the resulting corrections a little
+
+correctionPlot('Blue', 'l5')
+correctionPlot('Green', 'l5')
+correctionPlot('Red', 'l5')
+correctionPlot('dWL', 'l5')
+correctionPlot('dWL', 'l8')
+correctionPlot('Blue', 'l8')
+correctionPlot('Green', 'l8')
+correctionPlot('Red', 'l8')
+
+
+```
