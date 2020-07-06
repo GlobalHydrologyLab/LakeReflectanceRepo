@@ -36,31 +36,65 @@ fui.hue <- function(R, G, B) {
 }
 
 ## Function for comparing sensors during coincident time periods
-correctionPlot <- function(band, sat){
+correctionPlot <- function(band, sat, dataPre, dataPost){
   if(sat == 'l8'){
-    x <- refCompPre %>% filter(year > 2012)
+
+    df <- tibble(l7 = quantile(dataPost[sat == 'l7' & year > 2012, ..band
+                           ][[1]], seq(.01,.99,.01)),
+    Original = quantile(dataPre[sat == sat & year > 2012, ..band
+                                 ][[1]], seq(.01,.99,.01)),
+    PostCorrection = quantile(dataPost[sat == sat & year > 2012, ..band
+                                       ][[1]], seq(.01,.99,.01)))
   }else if(sat == 'l5'){
-    x <- refCompPre %>% filter(year > 1999, year < 2012)
+
+    df <- tibble(l7 = quantile(dataPost[sat == 'l7' & year < 2012 & year > 1999, ..band
+                           ][[1]], seq(.01,.99,.01)),
+    Original = quantile(dataPre[sat == sat & year < 2012 & year > 1999, ..band
+                                ][[1]], seq(.01,.99,.01)),
+    PostCorrection = quantile(dataPost[sat == sat & year < 2012 & year > 1999, ..band
+                                       ][[1]], seq(.01,.99,.01)))
   }
-  max.x <- max(x[,band])
-  df <- tibble(y = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
-                            seq(.01,.99, .01)), 
-               x = quantile(x %>% filter(sat == sat) %>% .[,band], 
-                            seq(.01,.99, .01)))
-  lm <- lm(y~poly(x, 2), data = df)
-  r2 <- summary(lm)$adj.r.squared %>% round(4)
   
-  df <- df %>% bind_cols(Corrected = lm$fitted.values) %>%
-    gather(x, Corrected, key = 'Reflectance', value = x) %>%
-    mutate(Reflectance = ifelse(Reflectance == 'x', 'Original', Reflectance))
+  df <- df %>% gather(Original, PostCorrection, key = "Correction", value = 'Reflectance')
   
-  
-  ggplot(df, aes(x = x, y = y, color = Reflectance)) + geom_point(alpha = .5) + 
+  ggplot(df, aes(x = l7, y = Reflectance, color = Correction)) + geom_point(alpha = .5) + 
     geom_abline(color = 'red') + 
-    annotate('text', label = paste0("italic(R)^2 ==", r2), parse = T, x = -Inf, y = Inf, vjust = 1.2, hjust = -.2) +
     scale_color_viridis_d(begin = .2, end = .8) +
+    stat_regline_equation(aes(label =  paste(..adj.rr.label..))) +
     theme_bw() +
     #scale_y_continuous(sec.axis = sec_axis(~.*(100/max.x), name = 'Quantile')) + 
-    labs(x = paste0(capitalize(sat), " SR"), y = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction")) +
-    labs(title = paste0(capitalize(band))) 
+    labs(y = paste0(capitalize(sat), " SR"), x = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction"))
 }
+  
+ 
+
+
+## Old Correction plot function
+# correctionPlot <- function(band, sat){
+#   if(sat == 'l8'){
+#     x <- refCompPre %>% filter(year > 2012)
+#   }else if(sat == 'l5'){
+#     x <- refCompPre %>% filter(year > 1999, year < 2012)
+#   }
+#   max.x <- max(x[,band])
+#   df <- tibble(y = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+#                             seq(.01,.99, .01)), 
+#                x = quantile(x %>% filter(sat == sat) %>% .[,band], 
+#                             seq(.01,.99, .01)))
+#   lm <- lm(y~poly(x, 2), data = df)
+#   r2 <- summary(lm)$adj.r.squared %>% round(4)
+#   
+#   df <- df %>% bind_cols(Corrected = lm$fitted.values) %>%
+#     gather(x, Corrected, key = 'Reflectance', value = x) %>%
+#     mutate(Reflectance = ifelse(Reflectance == 'x', 'Original', Reflectance))
+#   
+#   
+#   ggplot(df, aes(x = x, y = y, color = Reflectance)) + geom_point(alpha = .5) + 
+#     geom_abline(color = 'red') + 
+#     annotate('text', label = paste0("italic(R)^2 ==", r2), parse = T, x = -Inf, y = Inf, vjust = 1.2, hjust = -.2) +
+#     scale_color_viridis_d(begin = .2, end = .8) +
+#     theme_bw() +
+#     #scale_y_continuous(sec.axis = sec_axis(~.*(100/max.x), name = 'Quantile')) + 
+#     labs(x = paste0(capitalize(sat), " SR"), y = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction")) +
+#     labs(title = paste0(capitalize(band))) 
+# }
