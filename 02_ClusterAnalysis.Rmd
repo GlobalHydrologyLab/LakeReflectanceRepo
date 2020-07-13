@@ -1,0 +1,407 @@
+---
+title: "02_ClusterAnalysis"
+author: "Simon Topp"
+date: "7/8/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(purrr)
+library(furrr)
+library(data.table)
+library(feather)
+library(sf)
+library(dtwclust)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Squash it a bit
+```{r}
+srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+
+
+smashedWeekly <- as.data.table(srCor)[, biWeek := ifelse(week %% 2 == 0,
+                                                         week-1, week)
+                                      ][, .(medWl = median(dWL),
+                         sdWl = sd(dWL), 
+                         dswe1 = mean(pCount_dswe1),
+                         dswe3 = mean(pCount_dswe3),
+                         medTir = median(TIR1),
+                         sdTir = sd(TIR1),
+                         nObs = .N), 
+                     by = .(period, biWeek, Hylak_id)]
+
+
+
+
+smashedMonthly <- as.data.table(srCor)[, .(medWl = median(dWL),
+                         sdWl = sd(dWL), 
+                         dswe1 = mean(pCount_dswe1),
+                         dswe3 = mean(pCount_dswe3),
+                         medTir = median(TIR1),
+                         sdTir = sd(TIR1),
+                         nObs = .N), 
+                     by = .(period, month, Hylak_id)]
+
+
+ggplot(smashedMonthly, aes(x = period, y = medWl, fill = factor(month))) + geom_boxplot() + scale_fill_viridis_d() + ylim(450,600)
+
+smashedMonthly %>% filter(period %in% c("(1984,1990]", "(2014,2020]")) %>%
+ggplot( aes(x = medWl,  fill = period)) + geom_density(alpha = .6) + scale_fill_viridis_d(end = .8) + xlim(450,600) + facet_wrap(~month)
+
+
+```
+
+## Play around with some clustering
+
+```{r}
+## Take a representative sample of HydroLakes
+Ecoregs <- st_read('../USLakeClarityTrendr/in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+
+hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+  filter(Country == "United States of America") %>%
+  st_centroid() %>%
+  st_transform(st_crs(Ecoregs)) %>%
+  st_join(Ecoregs, left = F)
+
+sample <- hl %>% st_set_geometry(NULL) %>%
+  group_by(region) %>%
+  sample_n(1000)
+
+
+biWeekMeans <- srCor %>% filter(week > 17, week < 40, dWL > 450, dWL < 600) %>%
+  mutate(biWeek = ifelse(week %% 2 == 0, week-1, week)) %>%
+  group_by(biWeek, Hylak_id) %>%
+  summarise(dWl = mean(dWL))
+  
+counts <- biWeekMeans %>% ungroup() %>% dplyr::count(., Hylak_id) %>%
+  filter(n == 12)
+
+climatology = biWeekMeans %>% ungroup() %>% 
+  filter(Hylak_id %in% sample$Hylak_id,
+         Hylak_id %in% counts$Hylak_id) %>%
+  arrange(biWeek) %>%
+  pivot_wider(., names_from = biWeek, values_from = dWl)
+
+write_feather(climatology, 'data/out/dWLClimatologySample.feather')
+rm(biWeekMeans)
+rm(hl)
+rm(srCor)
+rm(smashedWeekly)
+```
+
+
+```{r}
+c.norm <- climatology %>%
+  pivot_longer(`17`:`39`, 'biWeek') %>%
+  group_by(Hylak_id) %>%
+  mutate(value = scale(value)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = biWeek, values_from = value)
+
+
+cluster_dtw<-tsclust(c.norm %>% select(-Hylak_id), type = "h", k = 2L:15L, 
+                     distance = "Euclidean",#"dtw_basic"
+                     args = tsclust_args(dist = list(window.size = 2L)),
+                     #centroid = dba, 
+                     control = hierarchical_control(method = "complete"),
+                     preproc = NULL,
+                     trace = T)
+
+## OR
+
+cluster_dtw <- tsclust(climatology %>% select(-Hylak_id), type = "h", k = 2L:5L, 
+                     distance = "Euclidean",#"dtw_basic"
+                     args = tsclust_args(dist = list(window.size = 2L)),
+                     #centroid = pam, 
+                     control = hierarchical_control(method = "complete"),
+                     preproc = NULL,
+                     trace = T)
+
+plot(cluster_dtw[[1]], type = "centroid") 
+
+# "Sil" (!): Silhouette index (Rousseeuw (1987); to be maximized).
+# "D" (!): Dunn index (Arbelaitz et al. (2013); to be maximized).
+# "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
+# "DB" (?): Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
+# "DBstar" (?): Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
+# "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
+# "SF" (~): Score Function (Saitta et al. (2007); to be maximized; see notes).
+
+cvi_dw <- sapply(cluster_dtw, cvi, type = "internal")
+
+cvi_names <-rownames(cvi_dw)
+
+cvi_df <- cvi_dw %>%
+  as_data_frame() %>%
+  cbind( cvi_names) %>%
+  pivot_longer(-cvi_names, names_to="clusters", names_prefix = "V",values_to = "CVI" ) %>%
+  mutate(clusters = as.numeric(clusters) +1)
+
+ggplot(cvi_df) +
+  geom_line(aes(x=clusters, y=CVI)) +
+  facet_wrap(~cvi_names, scales="free")
+
+clusters <- hl %>% right_join(tibble(Hylak_id = c.norm$Hylak_id, cluster = predict(cluster_dtw[[3]],c.norm %>% select(-Hylak_id))))
+
+mapview::mapview(clusters,zcol = 'cluster')
+
+ggplot(clusters, aes(x = factor(cluster), y = Lake_area)) + geom_boxplot() + scale_y_log10()
+
+ggplot(clusters, aes(x = factor(cluster))) + geom_bar() + facet_wrap(~region, scales = 'free')
+
+interactive_clustering(c.norm %>%
+                         #na.omit() %>% 
+                         select(-c(Hylak_id)))
+```
+
+## Monthly check
+
+```{r}
+c.monthly <- as.data.table(srCor)[, .(medWl = median(dWL),
+                         sdWl = sd(dWL), 
+                         dswe1 = mean(pCount_dswe1),
+                         dswe3 = mean(pCount_dswe3),
+                         medTir = median(TIR1),
+                         sdTir = sd(TIR1),
+                         nObs = .N), 
+                     by = .(month, Hylak_id)]
+
+hl.sf <- hl %>% inner_join(c.monthly) 
+
+ggplot(hl.sf %>% filter(medWl > 450, medWl < 600)) + geom_sf(aes(color = medWl), alpha = .6, size = .5) +
+  scale_color_gradient(low = '#191970', high = '#3cb371') +
+  facet_wrap(~month)
+
+counts <- c.monthly %>% filter(nObs > 5) %>%
+  group_by(Hylak_id) %>%
+  summarise(count = n()) %>%
+  filter(count == 12)
+
+c.monthly <- c.monthly %>% filter(Hylak_id %in% counts$Hylak_id)
+
+c.norm <- c.monthly %>%
+  group_by(Hylak_id) %>%
+  mutate(medWl = scale(medWl)) %>%
+  ungroup() %>%
+  select(Hylak_id, month, medWl) %>%
+  arrange(month) %>%
+  pivot_wider(names_from = month, values_from = medWl)
+
+
+cluster_dtw<-tsclust(c.norm %>% select(-Hylak_id), type = "h", k = 2L:6L, 
+                     distance = "Euclidean",#"dtw_basic"
+                     args = tsclust_args(dist = list(window.size = 2L)),
+                     #centroid = dba, 
+                     control = hierarchical_control(method = "complete"),
+                     preproc = NULL,
+                     trace = T)
+
+## OR
+
+cluster_dtw <- tsclust(climatology %>% select(-Hylak_id), type = "h", k = 2L:5L, 
+                     distance = "Euclidean",#"dtw_basic"
+                     args = tsclust_args(dist = list(window.size = 2L)),
+                     #centroid = pam, 
+                     control = hierarchical_control(method = "complete"),
+                     preproc = NULL,
+                     trace = T)
+
+plot(cluster_dtw[[3]], type = "centroid") 
+
+# "Sil" (!): Silhouette index (Rousseeuw (1987); to be maximized).
+# "D" (!): Dunn index (Arbelaitz et al. (2013); to be maximized).
+# "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
+# "DB" (?): Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
+# "DBstar" (?): Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
+# "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
+# "SF" (~): Score Function (Saitta et al. (2007); to be maximized; see notes).
+
+cvi_dw <- sapply(cluster_dtw, cvi, type = "DB")
+
+cvi_names <-rownames(cvi_dw)
+
+cvi_df <- cvi_dw %>%
+  as_data_frame() %>%
+  cbind(cvi_names) %>%
+  pivot_longer(-cvi_names, names_to="clusters", names_prefix = "V",values_to = "CVI" ) %>%
+  mutate(clusters = as.numeric(clusters) +1)
+
+ggplot(cvi_df) +
+  geom_line(aes(x=clusters, y=CVI)) +
+  facet_wrap(~cvi_names, scales="free")
+
+clusters <- hl %>% right_join(tibble(Hylak_id = c.norm$Hylak_id, cluster = predict(cluster_dtw[[3]],c.norm %>% select(-Hylak_id))))
+
+mapview::mapview(clusters,zcol = 'cluster')
+
+ggplot(clusters, aes(x = factor(cluster), y = Slope_100)) + geom_boxplot() + 
+  coord_cartesian(ylim = c(.01,50)) + scale_y_log10()
+
+ggplot(clusters %>% filter(!is.na(region)), aes(x = factor(cluster))) + geom_bar() + facet_wrap(~region, scales = 'free')
+
+interactive_clustering(c.norm %>%
+                         #na.omit() %>% 
+                         select(-c(Hylak_id)))
+
+
+counts <- smashedMonthly %>%
+  group_by(Hylak_id, period) %>%
+  summarise(count = n()) %>%
+  filter(count == 12)
+
+smashedMonthly <- smashedMonthly %>% filter(Hylak_id %in% counts$Hylak_id)
+
+c.norm.full <- smashedMonthly %>%
+  group_by(Hylak_id, period) %>%
+  mutate(medWl = scale(medWl)) %>%
+  ungroup() %>%
+  select(Hylak_id, month, period, medWl) %>%
+  arrange(month) %>%
+  pivot_wider(names_from = month, values_from = medWl) %>%
+  na.omit()
+
+preds.full <- c.norm.full %>% select(Hylak_id, period) %>% 
+  bind_cols(
+    tibble(cluster = predict(cluster_dtw[[3]], c.norm.full %>%
+                               select(-c(Hylak_id,period)))
+           ))
+
+
+ggplot(preds.full, aes(x = period, fill = factor(cluster))) + geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent_format()) + scale_fill_viridis_d()
+
+```
+
+
+```{r}
+dwl.ts <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(20:44)) %>%
+  #mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
+  select(Hylak_id, period, biWeek, medWl) %>%
+  arrange(biWeek) %>%
+  pivot_wider(., names_from = biWeek, values_from = medWl)
+
+cfg <- compare_clusterings_configs(
+  types = "partitional",
+  k = 2L:10L,
+  controls = list(
+    partitional = partitional_control(
+    iter.max = 50L
+    )
+  ),
+  distances = pdc_configs(
+    "distance",
+    partitional = list(
+    dtw_basic = list(
+    window.size = seq(from = 1L, to = 3L, by = 1L)#,
+    #norm = c("L1", "L2")
+    )
+    )
+  ),
+  centroids = pdc_configs(
+    "centroid",
+    partitional = list(
+    shape = list()
+    )
+  ),
+  no.expand = c(
+  "window.size"#,
+  #"norm"
+  )
+)
+evaluators <- cvi_evaluators()
+comparison <- compare_clusterings(climatology %>%
+                       select(-c(Hylak_id)),
+                   types = "partitional",
+    configs = cfg, seed = 8L, trace = T,
+    score.clus = evaluators$score,
+    pick.clus = evaluators$pick)
+
+```
+
+
+
+```{r}
+library(dtwclust)
+
+dwl.ts <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(20:44)) %>%
+  #mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
+  select(Hylak_id, period, biWeek, medWl) %>%
+  arrange(biWeek) %>%
+  pivot_wider(., names_from = biWeek, values_from = medWl)
+
+stl.ts <- stl %>% mutate(wlClean = seasonal + trend) %>%
+  select(Hylak_id, period, biWeek, wlClean) %>%
+  arrange(biWeek) %>%
+  pivot_wider(., names_from = biWeek, values_from = wlClean)
+
+# dwl.ts.scaled <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(19:45)) %>%
+#   mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
+#   select(lake_period, biWeek, medWl) %>%
+#   group_by(lake_period) %>%
+#   mutate(medWl = scale(medWl)) %>%
+#   ungroup() %>%
+#   arrange(biWeek) %>%
+#   pivot_wider(., names_from = biWeek, values_from = medWl) %>%
+#   column_to_rownames('lake_period')
+
+
+
+```
+
+# Try to pull out the seasonal component first then cluster
+
+```{r}
+library(stlplus)
+
+dwl.ts <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(19:41)) %>%
+  #mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
+  select(Hylak_id, period, biWeek, medWl) %>%
+  arrange(Hylak_id, period, biWeek)
+
+counts <- dplyr::count(dwl.ts, Hylak_id) %>%
+  filter(n > 68)
+
+ids <- unique(counts$Hylak_id)
+#   dwl.ts %>% filter(!Hylak_id %in% unique(counts$Hylak_id)) %>%
+#   distinct(Hylak_id)
+# ids <- unique(ids$Hylak_id)
+
+grid <- expand_grid(period = unique(dwl.ts$period), biWeek = unique(dwl.ts$biWeek), Hylak_id = ids)
+
+stl.in <- dwl.ts %>% filter(Hylak_id %in% ids) %>%
+  full_join(grid) %>% arrange(Hylak_id, period, biWeek)
+
+# check <- stl.in %>% filter(is.na(medWl)) %>%
+#   dplyr::count(., biWeek, Hylak_id)
+# 
+# check2 <- dplyr::count(check %>% filter(n == 6), biWeek)
+
+sample <- sample(ids, 5000)
+
+Sys.time()
+plan(multiprocess)
+
+stl <- stl.in %>% filter(Hylak_id %in% sample) %>%
+  group_by(Hylak_id) %>%
+  nest() %>%
+  mutate(stl = future_map(data, ~stlplus(x = .$medWl, n.p = 12, s.window = 5), .progress = T),
+         stl = future_map(stl, 'data')) %>%
+  #select(-data) %>%
+  unnest(cols = c(data, stl))
+
+plan(sequential)
+Sys.time()
+p1 <- ggplot(stl, aes(x = biWeek, y = seasonal + trend, color = period)) + geom_line() + 
+  facet_wrap(~Hylak_id, scales = 'free')
+
+p2 <- ggplot(stl, aes(x = biWeek, y = medWl, color = period)) + geom_line() + 
+  facet_wrap(~Hylak_id, scales = 'free')
+
+gridExtra::grid.arrange(p1,p2)
+
+```
+
