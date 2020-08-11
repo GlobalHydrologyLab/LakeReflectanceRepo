@@ -53,7 +53,7 @@ test.k <- ksmooth(test$doy, test$dWL, kernel = 'normal', bandwidth = 14, range.x
 
 k.smoother <- function(data){
  k <- ksmooth(data$doy, data$dWL, kernel = 'normal', 
-                   bandwidth = 21, range.x = seq(1,365), 
+                   bandwidth = 28, range.x = seq(1,365), 
                    x.points = seq(1,365,7))
  pheno = tibble(doy = k$x, smoothed = k$y)
  return(pheno)
@@ -83,12 +83,11 @@ ggplot(test.out, aes(x = doy)) + geom_line(aes(y = smoothed), color = 'red') +
 ## Try pulling out the smoothed trend lines using doy for each period
 
 ```{r}
-# start with just 10 for sandboxing
 srCor <- as.data.table(srCor)[,period := cut(year,6, dig.lab = 4)
-                                ][,doy := yday(date)
-                                  ][,biWeek := ifelse(week == 53, 52, 
-                                                      ifelse(week %% 4 == 0,
-                                                         week, week - week%%4 + 4))]
+                                ][, doy := yday(date)
+                                  ][, week := ifelse(week  == 53,52,week)
+                                    ][,biWeek := ifelse(week %% 4 == 0,
+                                                         week, week - week%%4 +4)]
 
 
 ## Find lakes with data in all 12 periods with at least 2 observations per bi-week 
@@ -100,27 +99,32 @@ combos <- as.data.table(expand.grid(biWeek = unique(FilterCounts$biWeek), Hylak_
 Filter <- merge(FilterCounts,combos, all = T)[is.na(N)]
 
 lakeSamp <- srCor[!Hylak_id %in% unique(Filter$Hylak_id),.(Hylak_id, period, date, dWL, doy)
-                  ][,dWL := scale(dWL), by = .(Hylak_id, period)]
+                  ][,dWL := scale(dWL), by = .(Hylak_id, period)
+                    ][dWL < 4 & dWL > -4]
 
 length(unique(lakeSamp$Hylak_id))
 
-## Remove a bunch of stuff cause it's using tons of memory
-rm(srCor)
+# function for nesting with data.table
+.nest <- function(...) list(data.table(...))
 
+smoothed <- lakeSamp[, .(data = .nest(.SD)),  by = .(period, Hylak_id)]
+
+tic()
 plan(multiprocess)
-smoothed <- lakeSamp %>%
-  group_by(period, Hylak_id) %>%
-  nest() %>%
+smoothed <- smoothed %>%
+  as_tibble() %>%
   mutate(kmeans = future_map(data, k.smoother, .progress = T)) %>%
   select(-data) %>%
   unnest(kmeans)
 plan(sequential)
+toc()
 
-smoothed <- smoothed %>% ungroup()
-vis <- smoothed %>% distinct(Hylak_id) %>% sample_n(10)
+vis <- smoothed %>% distinct(Hylak_id) %>% sample_n(5)
 
 ggplot(smoothed %>% filter(Hylak_id %in% vis$Hylak_id)) + 
-  geom_point(aes(x = doy, y = smoothed)) + facet_grid(period~Hylak_id)
+  geom_point(data = lakeSamp %>% filter(Hylak_id %in% vis$Hylak_id), aes(x = doy, y = dWL)) +
+  geom_line(aes(x = doy, y = smoothed), color = 'red') + 
+  facet_grid(period~Hylak_id, scales = 'free')
 
 c.norm <- smoothed %>%
   arrange(doy) %>%
@@ -133,23 +137,29 @@ write_feather(c.norm, paste0('data/out/',iterations,'_12monthNormalized.feather'
 
 ## Clustering scales exponentially with the number of inputs and maxes out at ~10,000
 ## So we'll build the clustering on only half the data then apply it to the full dataset
-set.seed(24235)
+missing <- c.norm[rowSums(is.na(c.norm)) > 0,]
+c.norm <- c.norm %>% filter(!Hylak_id %in% missing$Hylak_id)
+
+set.seed(4235)
 sample <- c.norm %>% ungroup() %>% distinct(Hylak_id) %>% sample_n(1500)
 sample <- c.norm %>% ungroup() %>% filter(Hylak_id %in% sample$Hylak_id)
 
 ##Take a quick look at the distribution
-sample %>% inner_join(hl) %>% st_as_sf() %>% mapview::mapview(.)
+#sample %>% inner_join(hl) %>% st_as_sf() %>% mapview::mapview(.)
 
 cluster_dtw<-tsclust(sample %>% select(-Hylak_id, -period), 
                      type = "h", k = 2L:8L, 
                      distance = "dtw_basic",
                      centroid = dba,
+                     #window.size = 2L,
                      control = hierarchical_control(method ="complete"),
+                     args = tsclust_args(dist = list(window.size = 3L),
+                                         cent = list(window.size = 3L)),
                      preproc = NULL)
 
 # extract the cluster validation indices
 
-cvi_dw <-sapply(cluster_dtw, cvi, type = "valid") 
+cvi_dw <-sapply(cluster_dtw, cvi, type = c('Sil', 'D', 'COP', 'DB', 'DBstar'))# "valid") 
 
 cvi_names <-rownames(cvi_dw)
 
@@ -159,17 +169,22 @@ cvi_df <- cvi_dw %>%
   pivot_longer(-cvi_names, names_to="clusters", names_prefix = "V",values_to = "CVI" ) %>%
   mutate(clusters = as.numeric(clusters) +1)
 
+cvi.selects <- cvi_df %>% group_by(cvi_names) %>%
+  mutate(select= ifelse(cvi_names %in% c('CH', 'D', 'SF', 'Sil'), clusters[CVI == max(CVI)], clusters[CVI == min(CVI)]),
+         CVI = ifelse(cvi_names %in% c('CH', 'D', 'SF', 'Sil'), max(CVI), min(CVI))) %>%
+  select(-clusters) %>% distinct(cvi_names, .keep_all = T)
 
 ggplot(cvi_df) +
   geom_line(aes(x=clusters, y=CVI)) +
+  geom_point(data = cvi.selects, aes(x = select, y = CVI)) +
   facet_wrap(~cvi_names, scales="free")
 
 # The vignette to dtwclust mentions that CH and SF may not be appropriate with 
 # dba centroids, so that leaves us with COP-8 (big drop 4), D-8, DB-7,DB*-4/5, Sil-3
-plot(cluster_dtw[[3]], type = "centroid") 
+plot(cluster_dtw[[2]], type = "centroid") 
 
-#We'll use 4 for parsimony
-cluster <- cluster_dtw[[3]]
+#We'll use 3 for parsimony
+cluster <- cluster_dtw[[2]]
 save(cluster, cvi_df, file = paste0('data/out/',iterations,'_12monthClusterings.RData'))
 
 
@@ -183,7 +198,7 @@ save(cluster, cvi_df, file = paste0('data/out/',iterations,'_12monthClusterings.
 
 clusters.sf <- hl %>% inner_join(
   tibble(Hylak_id = c.norm$Hylak_id, period = c.norm$period, 
-         cluster = predict(cluster_dtw[[3]], c.norm %>% ungroup() %>% 
+         cluster = predict(cluster_dtw[[2]], c.norm %>% ungroup() %>% 
                              select(-c(Hylak_id, period)))))
 
 usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
@@ -195,15 +210,24 @@ ggplot() +
 
 mapview::mapview(clusters.sf %>% filter(period == '(2008,2020]', cluster %in% c(2,3,4)), zcol = 'cluster')
 
-lakeSamp <- srCor[!Hylak_id %in% unique(Filter$Hylak_id),.(Hylak_id, period, date, dWL, doy)
-                  ]
+lakeSamp.base <- merge(
+  srCor[Hylak_id %in% unique(c.norm$Hylak_id),.(Hylak_id, period, week, date, dWL, doy)],
+  as.data.table(clusters.sf %>% select(Hylak_id, period, cluster)))
 
-check <- lakeSamp %>% inner_join(clusters.sf %>% select(Hylak_id, period, cluster))
+iqrs <- lakeSamp.base[,.(iqr75 = quantile(dWL, .75), 
+                         iqr25 = quantile(dWL, .25),
+                         iqr50 = median(dWL)), by = .(cluster, week)]
 
-clustMeds <- check %>% group_by(cluster) %>% summarise(med = median(dWL))
+ggplot(iqrs, aes(x = week)) + 
+  geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
+  geom_line(aes(y = iqr50)) +
+  facet_wrap(~cluster)
 
-ggplot(check %>% filter(dWL >400, dWL < 650) %>%
-         mutate(month = lubridate::month(date,label = T)), aes(x = month, y = dWL)) + 
+ggplot(clusters.sf)
+
+clustMeds <- lakeSamp.base %>% group_by(cluster) %>% summarise(med = median(dWL))
+
+ggplot(lakeSamp.base %>% filter(dWL >400, dWL < 650), aes(x = factor(month), y = dWL)) + 
   geom_boxplot() + geom_hline(data = clustMeds, aes(yintercept = med), color = 'red') + facet_grid(~cluster) 
 
 ```

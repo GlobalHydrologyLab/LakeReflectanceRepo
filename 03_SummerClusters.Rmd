@@ -38,11 +38,18 @@ hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/Hyd
   st_join(Ecoregs, left = F)
 
 
+
 srCor <- as.data.table(srCor)[,period := cut(year,6, dig.lab = 4)
                                 ][,doy := yday(date)
                                   ][,biWeek := ifelse(week == 53, 52, 
-                                                      ifelse(week %% 4 == 0,
-                                                         week, week - week%%4 + 4))]
+                                                      ifelse(week %% 2 == 0,
+                                                         week, week + 1))]
+
+#[,biWeek := ifelse(week == 53, 52, 
+                                                      ifelse(week %% 3 == 0,
+                                                         week, week - week%%3 + 3))]
+
+#
 ```
 
 
@@ -55,30 +62,67 @@ combos <- as.data.table(expand.grid(biWeek = unique(FilterCounts$biWeek), Hylak_
 
 Filter <- merge(FilterCounts,combos, all = T)[is.na(N)]
 
-lakeSamp <- srCor[!Hylak_id %in% unique(Filter$Hylak_id),.(Hylak_id, period, date, dWL, doy)
+
+## Now do the same for just for May-October
+summerCounts <- srCor[biWeek >= 18 & biWeek <= 42][, .N, by = .(Hylak_id, period, biWeek)]
+
+# Find all possible combos to make sure its exhaustive
+combos <- as.data.table(expand.grid(biWeek = unique(summerCounts$biWeek), Hylak_id = unique(srCor$Hylak_id), period = unique(summerCounts$period)))
+
+summerFilter <- merge(summerCounts,combos, all = T)[is.na(N)]
+
+
+lakeSamp <- srCor[biWeek >= 18 & biWeek <= 42 & Hylak_id %in% unique(Filter$Hylak_id)
+                  ][!Hylak_id %in% unique(summerFilter$Hylak_id),
+                  .(Hylak_id, period, date, dWL, doy)
                   ][,dWL := scale(dWL), by = .(Hylak_id, period)]
 
 length(unique(lakeSamp$Hylak_id))
+check <- lakeSamp %>% group_by(Hylak_id, period) %>% summarize(count = n(), mean = mean(dWL), sd = sd(dWL))
+
+lakeSamp %>% distinct(Hylak_id) %>% inner_join(hl) %>% st_as_sf() %>%mapview::mapview()
 
 ## Remove a bunch of stuff cause it's using tons of memory
 rm(srCor)
 
+min(lakeSamp$doy)
+max(lakeSamp$doy)
+k.smoother.summer <- function(data){
+ k <- ksmooth(data$doy, data$dWL, kernel = 'normal', 
+                   bandwidth = 21, range.x = seq(min(lakeSamp$doy),max(lakeSamp$doy)), 
+                   x.points = seq(min(lakeSamp$doy),max(lakeSamp$doy),7))
+ pheno = tibble(doy = k$x, smoothed = k$y)
+ return(pheno)
+}
+
+.nest <- function(...) list(data.table(...))
+
+smoothed <- lakeSamp[, .(data = .nest(.SD)),  by = .(period, Hylak_id)]
+
+tic()
+test <- smoothed[,kmeans := map(data, k.smoother.summer)
+                       ][, .(Hylak_id, period, kmeans)
+                         ][,unnest(.SD, kmeans)]
+toc()
+
+tic()
 plan(multiprocess)
-smoothed <- lakeSamp %>%
-  group_by(period, Hylak_id) %>%
-  nest() %>%
-  mutate(kmeans = future_map(data, k.smoother, .progress = T)) %>%
+test <- smoothed %>%
+  as_tibble() %>%
+  mutate(kmeans = future_map(data, k.smoother.summer, .progress = T)) %>%
   select(-data) %>%
   unnest(kmeans)
 plan(sequential)
+toc()
 
-smoothed <- smoothed %>% ungroup()
-vis <- smoothed %>% distinct(Hylak_id) %>% sample_n(10)
+check <- lakeSamp %>% group_by(period, Hylak_id) %>% summarise(count = n())
 
-ggplot(smoothed %>% filter(Hylak_id %in% vis$Hylak_id)) + 
+vis <- test %>% distinct(Hylak_id) %>% sample_n(10)
+
+ggplot(test %>% filter(Hylak_id %in% vis$Hylak_id)) + 
   geom_point(aes(x = doy, y = smoothed)) + facet_grid(period~Hylak_id)
 
-c.norm <- smoothed %>%
+c.norm <- test %>%
   arrange(doy) %>%
   pivot_wider(names_from = doy, values_from = smoothed)
 
@@ -89,7 +133,7 @@ write_feather(c.norm, paste0('data/out/',iterations,'_12monthNormalized.feather'
 
 ## Clustering scales exponentially with the number of inputs and maxes out at ~10,000
 ## So we'll build the clustering on only half the data then apply it to the full dataset
-set.seed(24235)
+set.seed(4235)
 sample <- c.norm %>% ungroup() %>% distinct(Hylak_id) %>% sample_n(1500)
 sample <- c.norm %>% ungroup() %>% filter(Hylak_id %in% sample$Hylak_id)
 
@@ -100,14 +144,17 @@ cluster_dtw<-tsclust(sample %>% select(-Hylak_id, -period),
                      type = "h", k = 2L:8L, 
                      distance = "dtw_basic",
                      centroid = dba,
+                     #window.size = 2L,
                      control = hierarchical_control(method ="complete"),
+                     args = tsclust_args(dist = list(window.size = 2L),
+                                         cent = list(window.size = 2L)),
                      preproc = NULL)
 
 # extract the cluster validation indices
 
 cvi_dw <-sapply(cluster_dtw, cvi, type = "valid") 
 
-cvi_names <-rownames(cvi_dw)
+cvi_names <- rownames(cvi_dw)
 
 cvi_df <- cvi_dw %>%
   as_data_frame() %>%
@@ -122,8 +169,8 @@ ggplot(cvi_df) +
 
 # The vignette to dtwclust mentions that CH and SF may not be appropriate with 
 # dba centroids, so that leaves us with COP-8 (big drop 4), D-8, DB-7,DB*-4/5, Sil-3
-plot(cluster_dtw[[3]], type = "centroid") 
-
+plot(cluster_dtw[[2]], type = "centroid") 
+plot(cluster_dtw[[1]], type = 'd')
 #We'll use 4 for parsimony
 cluster <- cluster_dtw[[3]]
 save(cluster, cvi_df, file = paste0('data/out/',iterations,'_12monthClusterings.RData'))
@@ -139,7 +186,7 @@ save(cluster, cvi_df, file = paste0('data/out/',iterations,'_12monthClusterings.
 
 clusters.sf <- hl %>% inner_join(
   tibble(Hylak_id = c.norm$Hylak_id, period = c.norm$period, 
-         cluster = predict(cluster_dtw[[3]], c.norm %>% ungroup() %>% 
+         cluster = predict(cluster_dtw[[2]], c.norm %>% ungroup() %>% 
                              select(-c(Hylak_id, period)))))
 
 usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
@@ -232,9 +279,9 @@ links.sf <- check %>% inner_join(hl) %>% st_as_sf()
 links.base <- links.sf %>% st_set_geometry(NULL)
 mapview::mapview(links.sf, zcol = 'States')
 
-var = 'Depth_avg'
+var = 'Res_time'
 
 ggplot(links.sf, aes_string(x = 'States', y = var)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability')# + coord_cartesian(y = c(0.01,100))
 
-wilcox.test(links.base[[var]][links.base$States == 1], links.base[[var]][links.base$States == 4])
+wilcox.test(links.base[[var]][links.base$States == 1], links.base[[var]][links.base$States == 3])
 ```
