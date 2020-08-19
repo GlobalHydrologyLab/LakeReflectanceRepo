@@ -17,6 +17,7 @@ library(feather)
 library(sf)
 library(dtwclust)
 library(networkD3)
+library(tictoc)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 ## Try pulling out the smoothed trend lines using doy for each period
@@ -24,7 +25,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 
-iterations = 'kmeans'
+iterations = 'May_Oct'
 ## Play around with some clustering
 
 ## Take a representative sample of HydroLakes
@@ -41,140 +42,156 @@ hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/Hyd
 
 srCor <- as.data.table(srCor)[,period := cut(year,6, dig.lab = 4)
                                 ][,doy := yday(date)
-                                  ][,biWeek := ifelse(week == 53, 52, 
-                                                      ifelse(week %% 2 == 0,
-                                                         week, week + 1))]
-
+                                  ][, week := ifelse(week  == 53,52,week)
+                                    ][,biWeek := ifelse(week %% 2 == 0,
+                                                         week, week + 1)]
 #[,biWeek := ifelse(week == 53, 52, 
-                                                      ifelse(week %% 3 == 0,
-                                                         week, week - week%%3 + 3))]
+#                                                      ifelse(week %% 3 == 0,
+#                                                         week, week - week%%3 + 3))]
 
 #
 ```
 
 
 ```{r}
-## Find lakes with data in all 12 periods with at least 2 observations per bi-week 
-FilterCounts <- srCor[, .N, by = .(Hylak_id, period, biWeek)]
+##  Take a look at biWeek distributions to decide cut-off's for 'Summer'
+hist(srCor$biWeek)
+#Looks like it should be ~18 and 38, or ~May-Oct
+summary(factor(srCor$biWeek))
+
+FilterCounts <- srCor[month %in% c(5:10)
+                      ][, .N, by = .(Hylak_id, period, month)]
 
 # Find all possible combos to make sure its exhaustive
-combos <- as.data.table(expand.grid(biWeek = unique(FilterCounts$biWeek), Hylak_id = unique(srCor$Hylak_id), period = unique(FilterCounts$period)))
+combos <- as.data.table(expand.grid(month = unique(FilterCounts$month),
+                                    Hylak_id = unique(srCor$Hylak_id), 
+                                    period = unique(FilterCounts$period)))
 
-Filter <- merge(FilterCounts,combos, all = T)[is.na(N)]
+# Get rid of months with < 2 Observations
+Filter <- merge(FilterCounts,combos, all = T)[is.na(N) | N < 2]
 
-
-## Now do the same for just for May-October
-summerCounts <- srCor[biWeek >= 18 & biWeek <= 42][, .N, by = .(Hylak_id, period, biWeek)]
-
-# Find all possible combos to make sure its exhaustive
-combos <- as.data.table(expand.grid(biWeek = unique(summerCounts$biWeek), Hylak_id = unique(srCor$Hylak_id), period = unique(summerCounts$period)))
-
-summerFilter <- merge(summerCounts,combos, all = T)[is.na(N)]
-
-
-lakeSamp <- srCor[biWeek >= 18 & biWeek <= 42 & Hylak_id %in% unique(Filter$Hylak_id)
-                  ][!Hylak_id %in% unique(summerFilter$Hylak_id),
+# Get rid of big outliers and scale dWL
+lakeSamp <- srCor[month %in% c(5:10) & !Hylak_id %in% unique(Filter$Hylak_id),
                   .(Hylak_id, period, date, dWL, doy)
-                  ][,dWL := scale(dWL), by = .(Hylak_id, period)]
+                  ][,dWL := scale(dWL), by = .(Hylak_id, period)
+                    ][dWL < 4 & dWL > -4]
 
+## This leaves us with ~26,000 lakes with at least 2 observations per month
+## in each of the 6 periods
 length(unique(lakeSamp$Hylak_id))
-check <- lakeSamp %>% group_by(Hylak_id, period) %>% summarize(count = n(), mean = mean(dWL), sd = sd(dWL))
 
+## Look at the distribution
 lakeSamp %>% distinct(Hylak_id) %>% inner_join(hl) %>% st_as_sf() %>%mapview::mapview()
-
-## Remove a bunch of stuff cause it's using tons of memory
-rm(srCor)
 
 min(lakeSamp$doy)
 max(lakeSamp$doy)
-k.smoother.summer <- function(data){
+
+# Create a function to pass a gaussian smoother over each perdiod/lake combo
+# to get 1 observation per weak.
+k.smoother.summer <- function(data, period, Hylak_id){
  k <- ksmooth(data$doy, data$dWL, kernel = 'normal', 
                    bandwidth = 21, range.x = seq(min(lakeSamp$doy),max(lakeSamp$doy)), 
                    x.points = seq(min(lakeSamp$doy),max(lakeSamp$doy),7))
- pheno = tibble(doy = k$x, smoothed = k$y)
- return(pheno)
+ 
+ tibble(period = period, Hylak_id = Hylak_id, doy = k$x, smoothed = k$y) %>%
+  arrange(doy) %>%
+  pivot_wider(names_from = doy, values_from = smoothed)
+ 
 }
 
+# Nest it all as a data.table
 .nest <- function(...) list(data.table(...))
 
 smoothed <- lakeSamp[, .(data = .nest(.SD)),  by = .(period, Hylak_id)]
 
+## Heads up, this takes about 25 minutes
 tic()
-test <- smoothed[,kmeans := map(data, k.smoother.summer)
-                       ][, .(Hylak_id, period, kmeans)
-                         ][,unnest(.SD, kmeans)]
-toc()
-
-tic()
-plan(multiprocess)
-test <- smoothed %>%
-  as_tibble() %>%
-  mutate(kmeans = future_map(data, k.smoother.summer, .progress = T)) %>%
-  select(-data) %>%
-  unnest(kmeans)
+plan(multiprocess, workers = 4)
+test <- smoothed %>% future_pmap_dfr(k.smoother.summer, .progress = T)
 plan(sequential)
 toc()
 
-check <- lakeSamp %>% group_by(period, Hylak_id) %>% summarise(count = n())
+write_feather(test, paste0('data/out/',iterations,'_Wide_Normalized.feather'))
 
-vis <- test %>% distinct(Hylak_id) %>% sample_n(10)
+vis <- smoothed %>% distinct(Hylak_id) %>% sample_n(5)
 
-ggplot(test %>% filter(Hylak_id %in% vis$Hylak_id)) + 
-  geom_point(aes(x = doy, y = smoothed)) + facet_grid(period~Hylak_id)
+vis <- smoothed %>% filter(Hylak_id %in% vis$Hylak_id) %>%
+  pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
+  mutate(doy = as.numeric(doy))
 
-c.norm <- test %>%
+ggplot(vis, aes(x = doy, y = dWL)) + 
+  geom_point(data = lakeSamp %>% 
+               filter(Hylak_id %in% vis$Hylak_id), alpha = .7) +
+  geom_line(color = 'red', size = 1) + 
+  facet_grid(period~Hylak_id, scales = 'free')
+```
+
+
+```{r}
+c.norm <- smoothed %>%
   arrange(doy) %>%
   pivot_wider(names_from = doy, values_from = smoothed)
 
 colSums(is.na(c.norm))
 
-## The above takes a bit to run, so save the period climatologies for later use
-write_feather(c.norm, paste0('data/out/',iterations,'_12monthNormalized.feather'))
+missing <- c.norm[rowSums(is.na(c.norm)) > 0,]
+c.norm <- c.norm %>% filter(!Hylak_id %in% missing$Hylak_id)
 
-## Clustering scales exponentially with the number of inputs and maxes out at ~10,000
-## So we'll build the clustering on only half the data then apply it to the full dataset
+
+c.norm.sf <- hl %>% inner_join(c.norm) %>% distinct(Hylak_id, .keep_all = T)
 set.seed(4235)
-sample <- c.norm %>% ungroup() %>% distinct(Hylak_id) %>% sample_n(1500)
-sample <- c.norm %>% ungroup() %>% filter(Hylak_id %in% sample$Hylak_id)
+sample <- c.norm.sf %>% group_by(region) %>% sample_frac(.15)
+#sample <- c.norm  %>% distinct(Hylak_id) %>% sample_n(1500)
+sample <- c.norm  %>% filter(Hylak_id %in% sample$Hylak_id)
 
 ##Take a quick look at the distribution
-sample %>% inner_join(hl) %>% st_as_sf() %>% mapview::mapview(.)
+#sample %>% inner_join(hl) %>% st_as_sf() %>% mapview::mapview(.)
 
-cluster_dtw<-tsclust(sample %>% select(-Hylak_id, -period), 
-                     type = "h", k = 2L:8L, 
+cluster_dtw<-tsclust(smoothed %>% select(-Hylak_id, -period), 
+                     type = "p", k = 2L:5L,#2L:8L, 
                      distance = "dtw_basic",
-                     centroid = dba,
+                     centroid = 'dba',
                      #window.size = 2L,
-                     control = hierarchical_control(method ="complete"),
+                     #control = hierarchical_control(method = 'complete'),
+                     control = partitional_control(iter.max = 400L),
+                     trace = T,
                      args = tsclust_args(dist = list(window.size = 2L),
                                          cent = list(window.size = 2L)),
                      preproc = NULL)
 
 # extract the cluster validation indices
+# The vignette to dtwclust mentions that CH and SF may not be appropriate with 
+# dba centroids, so we'll exclude them.
 
-cvi_dw <-sapply(cluster_dtw, cvi, type = "valid") 
 
-cvi_names <- rownames(cvi_dw)
+cvi_dw <-sapply(cluster_dtw, cvi, type = c('DB','DBstar', 'CH','SF'))#c('Sil', 'D', 'COP', 'DB', 'DBstar'))# "valid") 
+
+cvi_names <-rownames(cvi_dw)
 
 cvi_df <- cvi_dw %>%
-  as_data_frame() %>%
+  as_tibble() %>%
   cbind(cvi_names) %>%
   pivot_longer(-cvi_names, names_to="clusters", names_prefix = "V",values_to = "CVI" ) %>%
   mutate(clusters = as.numeric(clusters) +1)
 
+cvi.selects <- cvi_df %>% group_by(cvi_names) %>%
+  mutate(select= ifelse(cvi_names %in% c('CH', 'D', 'SF', 'Sil'), clusters[CVI == max(CVI)], clusters[CVI == min(CVI)]),
+         CVI = ifelse(cvi_names %in% c('CH', 'D', 'SF', 'Sil'), max(CVI), min(CVI))) %>%
+  select(-clusters) %>% distinct(cvi_names, .keep_all = T)
 
 ggplot(cvi_df) +
   geom_line(aes(x=clusters, y=CVI)) +
+  geom_point(data = cvi.selects, aes(x = select, y = CVI)) +
   facet_wrap(~cvi_names, scales="free")
 
 # The vignette to dtwclust mentions that CH and SF may not be appropriate with 
 # dba centroids, so that leaves us with COP-8 (big drop 4), D-8, DB-7,DB*-4/5, Sil-3
 plot(cluster_dtw[[2]], type = "centroid") 
-plot(cluster_dtw[[1]], type = 'd')
-#We'll use 4 for parsimony
-cluster <- cluster_dtw[[3]]
-save(cluster, cvi_df, file = paste0('data/out/',iterations,'_12monthClusterings.RData'))
 
+#We'll use 3 for parsimony
+cluster <- cluster_dtw[[2]]
+save(cluster, cvi_df, file = paste0('data/out/',iterations,'_SummerClusterings.RData'))
+load()
 
 # "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
 # "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
@@ -189,6 +206,10 @@ clusters.sf <- hl %>% inner_join(
          cluster = predict(cluster_dtw[[2]], c.norm %>% ungroup() %>% 
                              select(-c(Hylak_id, period)))))
 
+clusters.sf <- hl %>% inner_join(
+  tibble(Hylak_id = smoothed$Hylak_id, period = smoothed$period, 
+         cluster = cluster_dtw[[2]]@cluster))
+
 usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
 
 ggplot() + 
@@ -198,18 +219,117 @@ ggplot() +
 
 mapview::mapview(clusters.sf %>% filter(period == '(2008,2020]', cluster %in% c(2,3,4)), zcol = 'cluster')
 
-lakeSamp <- srCor[!Hylak_id %in% unique(Filter$Hylak_id),.(Hylak_id, period, date, dWL, doy)
-                  ]
+lakeSamp.base <- merge(
+  srCor[month %in% c(5:10) & Hylak_id %in% unique(smoothed$Hylak_id),
+        .(Hylak_id, period, week, date, dWL, doy)],
+  as.data.table(clusters.sf %>% select(Hylak_id, period, cluster)))
 
-check <- lakeSamp %>% inner_join(clusters.sf %>% select(Hylak_id, period, cluster))
+iqrs <- lakeSamp.base[,.(iqr75 = quantile(dWL, .75), 
+                         iqr25 = quantile(dWL, .25),
+                         med_dWL = median(dWL)), by = .(cluster, week)]
 
-clustMeds <- check %>% group_by(cluster) %>% summarise(med = median(dWL))
+p1 <- ggplot(iqrs, aes(x = week *7)) + 
+  geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
+  geom_line(aes(y = med_dWL)) +
+  facet_wrap(~cluster, ncol = 1) + 
+  labs(title = 'Raw dWL') +
+  theme_bw()
 
-ggplot(check %>% filter(dWL >400, dWL < 650) %>%
-         mutate(month = lubridate::month(date,label = T)), aes(x = month, y = dWL)) + 
-  geom_boxplot() + geom_hline(data = clustMeds, aes(yintercept = med), color = 'red') + facet_grid(~cluster) 
+clusters.long <- smoothed %>% pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'norm_dWL') %>% as.data.table()
 
+clusters.long <- merge(clusters.long, as.data.table(clusters.sf %>% select(Hylak_id, period, cluster)))
+
+iqrs.norm <- clusters.long[,.(iqr75 = quantile(norm_dWL, .75), 
+                         iqr25 = quantile(norm_dWL, .25),
+                         med_dWL = median(norm_dWL)), by = .(cluster, doy)
+                         ][,doy := as.numeric(doy)]
+
+p2 <- ggplot(iqrs.norm, aes(x = doy)) + 
+  geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
+  geom_line(aes(y = med_dWL)) +
+  facet_wrap(~cluster, ncol = 1) +
+  labs(title = 'Normalized dWL') +
+  theme_bw()
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
 ```
+
+## Look at the stability of each cluster
+
+
+```{r}
+library(clusteval)
+
+dtw_wrapper <- function(x, num_clusters){
+  
+  lakes <- as_tibble(x) %>% distinct(Hylak_id) %>% sample_n(1500)
+  sample <- as_tibble(x) %>% filter(Hylak_id %in% lakes$Hylak_id)
+  
+  cluster <-tsclust(sample %>% select(-Hylak_id, -period) %>% mutate_all(as.numeric), 
+                     type = "h", k = num_clusters, 
+                     distance = "dtw_basic",
+                     centroid = dba,
+                     control = hierarchical_control(method ="complete"),
+                     args = tsclust_args(dist = list(window.size = 2L),
+                                         cent = list(window.size = 2L)),
+                     preproc = NULL)
+  
+  preds <- predict(cluster, as_tibble(x) %>% select(-Hylak_id, -period) %>% mutate_all(as.numeric))
+  return(preds)
+}
+  
+test <- dtw_wrapper(c.norm, 3)  
+
+test <- clustomit(x = c.norm, num_clusters = 3, cluster_method = dtw_wrapper, num_reps = 5, num_cores = 1, similarity = 'jaccard')
+
+predict(cluster_dtw[[3]], c.norm %>% select(-Hylak_id, -period))
+
+
+check <- tibble(dummy1 = c(2,5,6), dummy2 = c(6,3,1))
+
+as.data.table(check) %>% as_tibble()%>% .[,'dummy1']
+
+x = c.norm
+cluster_method = dtw_wrapper
+similarity = 'jaccard'
+weighted_mean = T
+num_reps = 2
+num_cores = 1
+
+function (x, num_clusters, cluster_method, similarity = c("jaccard", 
+    "rand"), weighted_mean = TRUE, num_reps = 50, num_cores = getOption("mc.cores", 
+    2), ...) 
+{
+    x <- as.matrix(x)
+    num_clusters <- as.integer(num_clusters)
+    cluster_method <- match.fun(cluster_method)
+    similarity <- match.arg(similarity)
+    obs_clusters <- cluster_method(x = x, num_clusters = num_clusters)#, 
+        #...)
+    cluster_sizes <- as.vector(table(obs_clusters))
+    boot_indices <- boot_stratified_omit(y = obs_clusters, num_reps = num_reps)
+    boot_similarity <- mclapply(boot_indices, function(idx) {
+        clusters_omit <- cluster_method(x = x[idx, ], num_clusters = num_clusters - 
+            1, ...)
+        cluster_similarity(obs_clusters[idx], clusters_omit, 
+            similarity = similarity)
+    }, mc.cores = num_cores)
+    boot_similarity <- simplify2array(boot_similarity)
+    boot_similarity <- split(boot_similarity, gl(num_clusters, 
+        num_reps))
+    boot_similarity <- lapply(boot_similarity, as.vector)
+    boot_similarity_matrix <- do.call(cbind, boot_similarity)
+    boot_aggregate <- apply(boot_similarity_matrix, 1, weighted.mean, 
+        w = cluster_sizes)
+    obj <- list(boot_aggregate = as.vector(boot_aggregate), boot_similarity = boot_similarity, 
+        obs_clusters = obs_clusters, num_clusters = num_clusters, 
+        similarity = similarity)
+    class(obj) <- "clustomit"
+    obj
+}
+```
+
+
 
 
 ## Try to make a transition plot
@@ -261,27 +381,65 @@ links$IDtarget <- match(links$target, nodes$name)-1
 p <- sankeyNetwork(Links = links, Nodes = nodes,
                      Source = "IDsource", Target = "IDtarget",
                      Value = "Freq", NodeID = "name", NodeGroup = 'nodeGroup',
-                     sinksRight=FALSE)
+                     sinksRight=F, nodeWidth = 15, nodePadding = 30)
 
 p
-
  
 links.base <- links.base %>%
-  mutate(change1 = ifelse(`(1984,1996]` == `(1996,2008]`, 0,1),
-         change2 = ifelse(`(1996,2008]` == `(2008,2020]`, 0,1),
-         change3 = ifelse(`(1984,1996]` == `(2008,2020]`, 1,0),
-         totalChange = ifelse(change1 + change2 == 0, 0,change1 + change2 - change3),
-         totalChange = factor(totalChange))
+  mutate(change1 = ifelse(`(1984,1990]` == `(1990,1996]`, 0,1),
+         change2 = ifelse(`(1990,1996]` == `(1996,2002]`, 0,1),
+         change3 = ifelse(`(1996,2002]` == `(2002,2008]`, 0,1),
+         change4 = ifelse(`(2002,2008]` == `(2008,2014]`, 0,1),
+         change5 = ifelse(`(2008,2014]` == `(2014,2020]`, 0,1),
+         totalChange = factor(change1 + change2 + change3 + change4 + change5))
 
-check <- links.base %>% pivot_longer(`(1984,1990]`:`(2014,2020]`, names_to = 'Period', values_to = 'Cluster') %>% group_by(Hylak_id) %>% summarize(States = factor(length(unique(Cluster)), levels = c(1:4), labels = c(1:4)))
+summary(links.base$totalChange)
+
+stability <- links.base %>% 
+  pivot_longer(`(1984,1990]`:`(2014,2020]`, names_to = 'Period', 
+               values_to = 'Cluster') %>% 
+  group_by(Hylak_id) %>% 
+  summarize(States = factor(length(unique(Cluster)), 
+                            levels = c(1:3), labels = c(1:3))) %>%
+  left_join(links.base %>% select(Hylak_id, totalChange))
  
-links.sf <- check %>% inner_join(hl) %>% st_as_sf() 
+links.sf <- stability %>% inner_join(hl) %>% st_as_sf() 
 links.base <- links.sf %>% st_set_geometry(NULL)
 mapview::mapview(links.sf, zcol = 'States')
 
-var = 'Res_time'
-
-ggplot(links.sf, aes_string(x = 'States', y = var)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability')# + coord_cartesian(y = c(0.01,100))
+var = 'Depth_avg'
 
 wilcox.test(links.base[[var]][links.base$States == 1], links.base[[var]][links.base$States == 3])
+
+p1 <- ggplot(links.sf, aes(x = totalChange, y = Vol_total)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(.1,100))
+
+p2 <- ggplot(links.sf, aes(x = totalChange, y = Res_time)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(10,1000))
+
+p3 <- ggplot(links.sf, aes(x = totalChange, y = Slope_100)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(.5,5))
+
+p4 <- ggplot(links.sf, aes(x = totalChange, y = Depth_avg)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(1,10))
+
+gridExtra::grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+library(randomForest)
+df.rf <- links.base %>%
+  select(totalChange, Lake_type, Lake_area:Wshd_area, region) %>%
+  mutate(Lake_type = factor(Lake_type),
+         uniqueID = row_number())
+
+train <- df.rf %>% group_by(totalChange) %>% sample_frac(.7)
+test <- df.rf %>% filter(!uniqueID %in% train$uniqueID)
+train <- train %>% select(-uniqueID)
+
+rf = randomForest(totalChange ~ ., data=train, ntree=100, mtry=2, importance=TRUE)
+rf
+varImpPlot(rf)
+
+prediction_for_table <- predict(rf, test %>% select(-uniqueID, States))
+
+
+caret::confusionMatrix(prediction_for_table, test$States)
+
 ```
