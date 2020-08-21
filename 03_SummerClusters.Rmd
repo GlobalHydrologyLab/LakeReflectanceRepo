@@ -121,9 +121,20 @@ vis <- smoothed %>% filter(Hylak_id %in% vis$Hylak_id) %>%
 
 ggplot(vis, aes(x = doy, y = dWL)) + 
   geom_point(data = lakeSamp %>% 
-               filter(Hylak_id %in% vis$Hylak_id), alpha = .7) +
-  geom_line(color = 'red', size = 1) + 
+               filter(Hylak_id %in% vis$Hylak_id), 
+             aes(color = 'black'), alpha = .7) +
+  geom_line(size = 1, aes(color = 'red'), show.legend = T) +
+  scale_color_identity(guide = 'legend',
+                       name = '',
+                       breaks = c('black', 'red'),
+                       labels = c('Observed Color','Kmeans Climatology')) +
+  theme_bw() +
+  theme(legend.position = 'top') +
+  labs(x = 'Day of Year', y = 'Z-Normalized Dominant Wavelength') +
   facet_grid(period~Hylak_id, scales = 'free')
+
+
+ggsave('figures/ClimatologyExample.png', width = 6, height = 6.5, units = 'in')
 ```
 
 
@@ -226,14 +237,16 @@ lakeSamp.base <- merge(
 
 iqrs <- lakeSamp.base[,.(iqr75 = quantile(dWL, .75), 
                          iqr25 = quantile(dWL, .25),
-                         med_dWL = median(dWL)), by = .(cluster, week)]
+                         med_dWL = median(dWL)), by = .(cluster, week)
+                      ][,cluster := factor(cluster, labels = c('Bimodal', 'Summer Greening', 'Spring Greening'))]
 
 p1 <- ggplot(iqrs, aes(x = week *7)) + 
   geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
   geom_line(aes(y = med_dWL)) +
   facet_wrap(~cluster, ncol = 1) + 
-  labs(title = 'Raw dWL') +
-  theme_bw()
+  labs(title = 'Raw', y = 'Dominant Wavelength') +
+  theme_bw() +
+  theme(axis.title = element_blank()) 
 
 clusters.long <- smoothed %>% pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'norm_dWL') %>% as.data.table()
 
@@ -242,94 +255,136 @@ clusters.long <- merge(clusters.long, as.data.table(clusters.sf %>% select(Hylak
 iqrs.norm <- clusters.long[,.(iqr75 = quantile(norm_dWL, .75), 
                          iqr25 = quantile(norm_dWL, .25),
                          med_dWL = median(norm_dWL)), by = .(cluster, doy)
-                         ][,doy := as.numeric(doy)]
+                         ][,doy := as.numeric(doy)
+                           ][,cluster := factor(cluster, labels = c('Bimodal', 'Summer Greening', 'Spring Greening'))]
 
 p2 <- ggplot(iqrs.norm, aes(x = doy)) + 
   geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
   geom_line(aes(y = med_dWL)) +
   facet_wrap(~cluster, ncol = 1) +
-  labs(title = 'Normalized dWL') +
-  theme_bw()
+  labs(title = 'Normalized') +
+  theme_bw() +
+  theme(axis.title = element_blank()) 
 
-gridExtra::grid.arrange(p1,p2, ncol = 2)
+g <- gridExtra::grid.arrange(p1,p2, ncol = 2, left = 'Dominant Wavelength', bottom = 'Day of Year')
+
+ggsave('figures/ClusterIQRs.png',plot = g, width = 3.5, height = 4, units = 'in')
 ```
 
 ## Look at the stability of each cluster
 
 
 ```{r}
-library(clusteval)
+labels.og <- cluster@cluster
+x <- smoothed %>% select(-period, -Hylak_id)
 
-dtw_wrapper <- function(x, num_clusters){
+Jaccard = function (x, y,z) {
+    M.11 = sum(x == z & y == z)
+    M.10 = sum(x == z & y != z)
+    M.01 = sum(x != z & y == z)
+    return (M.11 / (M.11 + M.10 + M.01))
+}
+
+x <- s
+dtw_wrapper <- function(bootsrapped){
   
-  lakes <- as_tibble(x) %>% distinct(Hylak_id) %>% sample_n(1500)
-  sample <- as_tibble(x) %>% filter(Hylak_id %in% lakes$Hylak_id)
+  x.resample <- x %>% sample_n(nrow(x), replace = T)
   
-  cluster <-tsclust(sample %>% select(-Hylak_id, -period) %>% mutate_all(as.numeric), 
-                     type = "h", k = num_clusters, 
+  clust.resample<-tsclust(x.resample, 
+                     type = "p", k = 3L,#2L:8L, 
                      distance = "dtw_basic",
-                     centroid = dba,
-                     control = hierarchical_control(method ="complete"),
+                     centroid = 'dba',
+                     #window.size = 2L,
+                     #control = hierarchical_control(method = 'complete'),
+                     control = partitional_control(iter.max = 400L),
+                     trace = T,
                      args = tsclust_args(dist = list(window.size = 2L),
                                          cent = list(window.size = 2L)),
                      preproc = NULL)
+
+  labels.new <- predict(clust.resample, x) %>% unname()
   
-  preds <- predict(cluster, as_tibble(x) %>% select(-Hylak_id, -period) %>% mutate_all(as.numeric))
-  return(preds)
-}
+    ## Some hueristic iteration shows that the clusters centroids are always the three distinct groups with similar group sizes, but their order isn't always the same. So re-order based on group size
   
-test <- dtw_wrapper(c.norm, 3)  
-
-test <- clustomit(x = c.norm, num_clusters = 3, cluster_method = dtw_wrapper, num_reps = 5, num_cores = 1, similarity = 'jaccard')
-
-predict(cluster_dtw[[3]], c.norm %>% select(-Hylak_id, -period))
-
-
-check <- tibble(dummy1 = c(2,5,6), dummy2 = c(6,3,1))
-
-as.data.table(check) %>% as_tibble()%>% .[,'dummy1']
-
-x = c.norm
-cluster_method = dtw_wrapper
-similarity = 'jaccard'
-weighted_mean = T
-num_reps = 2
-num_cores = 1
-
-function (x, num_clusters, cluster_method, similarity = c("jaccard", 
-    "rand"), weighted_mean = TRUE, num_reps = 50, num_cores = getOption("mc.cores", 
-    2), ...) 
-{
-    x <- as.matrix(x)
-    num_clusters <- as.integer(num_clusters)
-    cluster_method <- match.fun(cluster_method)
-    similarity <- match.arg(similarity)
-    obs_clusters <- cluster_method(x = x, num_clusters = num_clusters)#, 
-        #...)
-    cluster_sizes <- as.vector(table(obs_clusters))
-    boot_indices <- boot_stratified_omit(y = obs_clusters, num_reps = num_reps)
-    boot_similarity <- mclapply(boot_indices, function(idx) {
-        clusters_omit <- cluster_method(x = x[idx, ], num_clusters = num_clusters - 
-            1, ...)
-        cluster_similarity(obs_clusters[idx], clusters_omit, 
-            similarity = similarity)
-    }, mc.cores = num_cores)
-    boot_similarity <- simplify2array(boot_similarity)
-    boot_similarity <- split(boot_similarity, gl(num_clusters, 
-        num_reps))
-    boot_similarity <- lapply(boot_similarity, as.vector)
-    boot_similarity_matrix <- do.call(cbind, boot_similarity)
-    boot_aggregate <- apply(boot_similarity_matrix, 1, weighted.mean, 
-        w = cluster_sizes)
-    obj <- list(boot_aggregate = as.vector(boot_aggregate), boot_similarity = boot_similarity, 
-        obs_clusters = obs_clusters, num_clusters = num_clusters, 
-        similarity = similarity)
-    class(obj) <- "clustomit"
-    obj
+  relabler <- table(labels.og, labels.new) %>% 
+    as_tibble() %>% 
+    arrange(-n, labels.og) %>%
+    distinct(labels.og, .keep_all = T)
+  
+  labels.new <- factor(labels.new, levels = relabler$labels.new, 
+                       labels = relabler$labels.og)
+  
+  
+  tibble(j1 = Jaccard(labels.og, labels.new, 1),
+  j2 = Jaccard(labels.og, labels.new, 2),
+  j3 = Jaccard(labels.og, labels.new, 3),
+  round = bootsrapped)
 }
+
+j.stability <- c(1:100) %>% map_dfr(dtw_wrapper)
+
+j.summary <- j.stability %>% pivot_longer(-round, names_to = 'cluster', values_to = 'score') %>% group_by(cluster) %>% summarise(mean.Jaccard = mean(score, na.rm = T), sd.Jaccard = sd(score, na.rm = T))
+
 ```
 
+## Look at spatial distribution of clusters
 
+```{r}
+
+## By period
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+grid <- st_make_grid(usa, cellsize = c(100000,100000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(clusters.sf, left = F)
+
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  mode <- ux[tab == max(tab)]
+  mode <- ifelse(length(mode) > 1, 'mixed', as.character(mode))
+  return(as.factor(mode))
+}
+
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID, period) %>%
+  summarise(modalClust = Modes(cluster))
+
+grid <- grid %>% inner_join(modalClust %>% mutate(modalClust = factor(modalClust, levels = c('1','2','3','mixed'), labels = c('Bimodal', 'Summer Greening', 'Spring Greening', 'Mixed'))))
+
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = grid, aes(fill = modalClust)) +
+  scale_fill_viridis_d() +
+  ggthemes::theme_map(base_family = 'Arial', base_size = 12) +
+  theme(legend.position = 'bottom') +
+  facet_wrap(~period)
+
+ggsave('figures/DominantCluster.png', width = 6.5, height = 4, units = 'in')
+
+
+## Overall
+grid <- st_make_grid(usa, cellsize = c(50000,50000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(clusters.sf, left = F)
+
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID) %>%
+  summarise(modalClust = Modes(cluster))
+
+grid <- grid %>% inner_join(modalClust %>% mutate(modalClust = factor(modalClust, levels = c('1','2','3','mixed'), labels = c('Bimodal', 'Summer Greening', 'Spring Greening', 'Mixed'))))
+
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = grid, aes(fill = modalClust)) +
+  scale_fill_viridis_d('Modal\nCluster', labels = c('Bimodal', 'Summer\nGreening','Spring\nGreening', 'Multiple\nModes'), option = 'plasma') +
+  ggthemes::theme_map(base_size = 11) +
+  theme(legend.position = 'bottom')
+
+ggsave('figures/DominantCluster.png', width = 4.5, height = 4, units = 'in')
+
+```
 
 
 ## Try to make a transition plot
@@ -378,10 +433,13 @@ links$IDsource <- match(links$source, nodes$name)-1
 links$IDtarget <- match(links$target, nodes$name)-1
  
 # Make the Network
+
+cs <- 'd3.scaleOrdinal() .range(["#440154FF", "#2A788EFF", "#7AD151FF"])'
 p <- sankeyNetwork(Links = links, Nodes = nodes,
                      Source = "IDsource", Target = "IDtarget",
                      Value = "Freq", NodeID = "name", NodeGroup = 'nodeGroup',
-                     sinksRight=F, nodeWidth = 15, nodePadding = 30)
+                     sinksRight=F, nodeWidth = 10, nodePadding = 30,
+                   colourScale = cs, fontSize = 0, fontFamily = 'Arial')
 
 p
  
@@ -411,15 +469,115 @@ var = 'Depth_avg'
 
 wilcox.test(links.base[[var]][links.base$States == 1], links.base[[var]][links.base$States == 3])
 
-p1 <- ggplot(links.sf, aes(x = totalChange, y = Vol_total)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(.1,100))
+p1 <- ggplot(links.sf, aes(x = totalChange, y = Vol_total)) +
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Volume (km3)') + 
+  coord_cartesian(ylim = c(.1,50)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size=4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
 
-p2 <- ggplot(links.sf, aes(x = totalChange, y = Res_time)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(10,1000))
+p2 <- ggplot(links.sf, aes(x = totalChange, y = Res_time)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Residence Time') + 
+  coord_cartesian(ylim = c(10,10000)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size=4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
 
-p3 <- ggplot(links.sf, aes(x = totalChange, y = Slope_100)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(.5,5))
+p3 <- ggplot(links.sf, aes(x = totalChange, y = pop_sum_mean)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') +
+  labs(x = 'Stability', y = 'Catchment Population') + 
+  coord_cartesian(ylim = c(50,15000)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size=4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
 
-p4 <- ggplot(links.sf, aes(x = totalChange, y = Depth_avg)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(1,10))
+p4 <- ggplot(links.sf, aes(x = totalChange, y = Slope_100)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  #scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Surrounding Slope') + 
+  coord_cartesian(ylim = c(.5,4)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size= 4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
 
-gridExtra::grid.arrange(p1,p2,p3,p4)
+p5 <- ggplot(links.sf, aes(x = totalChange, y = Depth_avg)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  #scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Average Depth (m)') + 
+  coord_cartesian(ylim = c(2,8)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size= 4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
+
+p6 <- ggplot(links.sf, aes(x = totalChange, y = total_precip_mm_mean)) +
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Mean Annual Precip (mm)') + 
+  coord_cartesian(ylim = c(3000, 10000)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size = 4, color="red", fill="red")  +
+  theme(axis.title.x = element_blank())
+
+g <- gridExtra::grid.arrange(p2,p3,p5,p6, bottom = 'Stability')
+
+ggsave('figures/LakeLandscapeMetrics.png', plot = g, width = 4, height = 4, units = 'in')
+## Bring in the GLCP
+#glcp <- read_csv('data/in/glcp.csv')
+#glcp.filt <- as.data.table(glcp)[Hylak_id %in% unique(smoothed$Hylak_id)]
+#write_feather(glcp.filt, 'data/in/glcpFiltered.feather')
+glcp <- read_feather('data/in/glcpFiltered.feather') %>%
+  mutate(spRatio = seasonal_km2/permanent_km2)
+
+glcp.avg <- glcp %>% group_by(Hylak_id) %>% summarise_at(vars(total_precip_mm:pop_sum, seasonal_km2, spRatio), c(mean = mean, sd = sd), na.rm = T)
+
+links.sf <- links.sf %>% left_join(glcp.avg)
+
+
+## Take another stab at her incorporating number of states too.
+ggplot(links.sf) + geom_bar(aes(x = totalChange, fill = States))
+ggplot(links.sf) + geom_sf(aes(color = as.numeric(States))) +
+  scale_color_viridis_c()
+
+
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+grid <- st_make_grid(usa, cellsize = c(50000,50000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(links.sf, left = F)
+
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID) %>%
+  summarise(modalClust = Modes(totalChange))
+
+modalClust <- grid %>% inner_join(modalClust %>% mutate(modalClust = factor(modalClust, levels = c('0','1','2','3','4','5','mixed'), labels = c('0','1','2','3','4','5','mixed'))))
+
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = modalClust, aes(fill = modalClust)) +
+  scale_fill_manual(values = c(br(6), 'grey30'), 'Mode State \nChanges') +
+  ggthemes::theme_map(base_size = 11) +
+  theme(legend.position = 'bottom')
+
+
+
+ggplot(links.sf, aes(x = totalChange, y = total_precip_mm_mean)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(3000,10000))
 ```
 
 ```{r}

@@ -390,6 +390,37 @@ ggplot(hl.sf %>% filter(medWl > 450, medWl < 600)) + geom_sf(aes(color = medWl),
 usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
 
 grid <- st_make_grid(usa, cellsize = c(100000,100000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(clusters.sf, left = F)
+
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID, period) %>%
+  summarise(modalClust = Modes(cluster))
+
+grid <- grid %>% inner_join(modalClust %>% mutate(modalClust = factor(modalClust, levels = c('1','2','3','mixed'), labels = c('Bimodal', 'Summer Greening', 'Spring Greening', 'Mixed'))))
+
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = grid, aes(fill = modalClust)) +
+  scale_fill_viridis_d() +
+  ggthemes::theme_map(base_family = 'Arial', base_size = 12) +
+  theme(legend.position = 'bottom') +
+  facet_wrap(~period)
+
+ggsave('figures/DominantCluster.png', width = 6.5, height = 4, units = 'in')
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  mode <- ux[tab == max(tab)]
+  mode <- ifelse(length(mode) > 1, 'mixed', mode)
+  return(as.character(mode))
+}
+
+
+grid <- grid %>% st_join(clusters.sf, left = F) %>% 
+  group_by(ID, period) %>%
+  mutate(modal_clust <- getmode(cluster))
 
 getmode <- function(v) {
    uniqv <- unique(v)
