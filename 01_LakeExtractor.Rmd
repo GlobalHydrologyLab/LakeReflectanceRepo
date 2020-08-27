@@ -118,7 +118,7 @@ refCompPre <- as.data.table(refCompPre)[, year := year(date)
                ][, week := week(date)
                  ][, month := month(date)
                    ][,period :=cut(year, 6)
-                    #][,dWLPre := fui.hue(Red, Green, Blue)
+                    ][,dWLPre := fui.hue(Red, Green, Blue)
                      ][,sat := factor(sat, levels = c('LANDSAT_5','LANDSAT_7','LANDSAT_8'),
                       labels = c('l5','l7','l8'))]
 
