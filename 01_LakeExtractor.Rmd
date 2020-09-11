@@ -102,9 +102,93 @@ ggplot(summary, aes(x = N)) +
   geom_vline(aes(xintercept = postMungeMean)) +
   theme_bw() +
   labs(title = '~22.3 Million Obs over 57k Lakes with an Average of 392 Obs per lake')
+
+
+##Spatial Distribution and count
+Ecoregs <- st_read('../USLakeClarityTrendr/in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+
+hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+  filter(Country == "United States of America",
+         Hylak_id %in% summary$Hylak_id) %>%
+  st_centroid() %>%
+  st_transform(st_crs(Ecoregs)) %>%
+  st_join(Ecoregs, left = F)
+
+## Check out many lakes there are vs what we have after munging
+# check <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+#   filter(Country == "United States of America") %>%
+#   st_join(usa %>% st_transform(4326), left = F)
+
+summary.sf <- summary %>% inner_join(hl) %>% st_as_sf()
+
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+grid <- st_make_grid(usa, cellsize = c(50000,50000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+counts.sf <- grid %>% st_join(summary.sf, left = F) %>%
+  group_by(ID) %>%
+  summarise(sumLakes = n(),
+            meanObs = median(N))
+
+tempDist <- as.data.table(munged)[, year := year(date)
+               ][, month := month(date)
+                 ][,.N, by = .(year, month)
+                   ][,date := ymd(paste0(year,'-',month,'-01'))
+                     ][, monthLab := lubridate::month(date, label = T)]
+
+p1 <- ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = counts.sf %>% mutate(sumLakes = ifelse(sumLakes > 100, 100, sumLakes)), aes(fill = sumLakes)) +
+  scale_fill_viridis_c('Number of Lakes', trans = 'log10', breaks = c(1,10,100), labels = c(1,10,'>100')) +
+  ggthemes::theme_map(base_size = 11) +
+  #labs(tag = 'B') +
+  theme(legend.position = 'top',
+        plot.margin = unit(c(0,0,-.3,0), 'null')) +
+  guides(fill = guide_colourbar(title.position="top"))
+
+
+p2 <- ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = counts.sf %>%
+            mutate(meanObs = ifelse(meanObs > 900, 900, meanObs)), aes(fill = meanObs)) +
+  scale_fill_viridis_c('Mean Observations per Lake', option = 'plasma', direction = -1, breaks = c(300,600,900), labels = c(300, 600, '>900')) +
+  ggthemes::theme_map(base_size = 11) +
+  #labs(tag = 'C') +
+  theme(legend.position = 'top',
+        plot.margin = unit(c(0,0,-.3,0), 'null')) +
+  guides(fill = guide_colourbar(title.position="top"))
+
+
+p3 <- ggplot(tempDist, aes(x = date, y = N, fill = monthLab)) + 
+  geom_col() + 
+  annotate('text', x = ymd('1990-01-01'), y = 100000, label = 'Total Observations', fontface = 'bold') +
+  scale_fill_viridis_d(option = 'cividis') + 
+  #scale_y_continuous(labels = scales::comma) +
+  labs(y = 'Count', fill = 'Month') +
+  ggthemes::theme_few() + 
+  theme(panel.border = element_blank(),
+        axis.title = element_blank(),
+        legend.position = c(.46,-.4),
+        legend.title = element_blank(),
+        plot.margin = unit(c(0,0,.4,0), 'null'),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(1, 'lines'),
+        legend.background = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, override.aes = list(size = 1)))
+
+
+layout <- rbind(c(2,3),
+                c(2,3),
+                c(2,3),
+                c(1,1))
+
+g <- gridExtra::grid.arrange(p3,p1,p2, layout_matrix = layout)
+
+ggsave('figures/ObsDistribution.png', plot = g, width = 7, units = 'in', dpi = 300)
+
 ```
 
-# After munging, we have  a mean of `r postMungeMean` observations and median of `r postMungeMed` obeservations per lake in hydrolakes.  Now join the data to the metadata and look at potential biases between sensors.
+# After munging, we have  a mean of `r postMungeMean` observations and median of `r postMungeMed` observations per lake in hydrolakes.  Now join the data to the metadata and look at potential biases between sensors.
 
 ```{r}
 meta <- read_csv('data/SceneMetadata.csv')
@@ -244,5 +328,22 @@ correctionPlot('Nir', 'l8', refCompPre, srCor)
 correctionPlot('TIR1', 'l8', refCompPre, srCor)
 ```
 
+## Look at some general patterns in dWL and Reflectance.
 
+```{r}
+## By period
+
+srCorSummary.sf <- merge(srCor, hl) %>% st_as_sf()
+
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+grid <- st_make_grid(usa, cellsize = c(100000,1000000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+gridSummary <- grid %>% st_join(srCorSummary.sf, left = F) %>%
+  set_geometry(NULL) %>%
+  as.data.table(.)[,ref := (Blue + Green + Red + Nir)/4
+                   ][,.(medianRef = median(ref, na.rm = T), mediandWL = median(dWL, na.rm = T)), by = ID]
+
+
+```
 
