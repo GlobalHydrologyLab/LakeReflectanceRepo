@@ -1,0 +1,622 @@
+---
+title: "3_StabilityAnalysis"
+author: "Simon Topp"
+date: "9/12/2020"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(purrr)
+library(furrr)
+library(data.table)
+library(feather)
+library(sf)
+library(dtwclust)
+library(networkD3)
+library(tictoc)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Make the sankey Network
+
+```{r}
+clusters.sf <- st_read('data/out/clustersSF.shp')
+
+links.base <- clusters.sf %>% st_set_geometry(NULL) %>%
+  #mutate(cluster = paste0('Cluster_',cluster)) %>%
+  #mutate(pClust = paste0('c',cluster,'_',period), count = 1) %>%
+  select(Hylak_id, period, cluster) %>%
+  arrange(period) %>%
+  pivot_wider(names_from = period, values_from = cluster) 
+
+links.base[is.na(links.base)] = 'None'
+
+p1Tab <- as.data.frame(table('source' = links.base[[2]],'target' = links.base[[3]])) %>%
+  mutate(source = paste0('p1_',source), target = paste0('p2_',target))
+
+p2Tab <- as.data.frame(table('source' = links.base[[3]],'target' = links.base[[4]])) %>%
+  mutate(source = paste0('p2_',source), target = paste0('p3_',target))
+
+p3Tab <- as.data.frame(table('source' = links.base[[4]],'target' = links.base[[5]])) %>%
+  mutate(source = paste0('p3_',source), target = paste0('p4_',target))
+
+p4Tab <- as.data.frame(table('source' = links.base[[5]],'target' = links.base[[6]])) %>%
+  mutate(source = paste0('p4_',source), target = paste0('p5_',target))
+
+p5Tab <- as.data.frame(table('source' = links.base[[6]],'target' = links.base[[7]])) %>%
+  mutate(source = paste0('p5_',source), target = paste0('p6_',target))
+
+links <- bind_rows(p1Tab,p2Tab,p3Tab,p4Tab,p5Tab)
+
+nodes <- data.frame(
+  name=c(as.character(links$source), as.character(links$target)) %>% 
+    unique()
+  ) %>%
+  mutate(nodeGroup = ifelse(grepl('Spring',name), 1, 
+                            ifelse(grepl('Summer',name), 2, 
+                                   ifelse(grepl('Bimodal',name),3,
+                                          ifelse(grepl('_4',name),4,
+                                                 ifelse(grepl('_5',name),5,
+                                                              ifelse(grepl('_6',name),6,7)))))),
+         nodeGroup = factor(nodeGroup))
+ 
+# With networkD3, connection must be provided using id, not using real name like in the links dataframe.. So we need to reformat it.
+links$IDsource <- match(links$source, nodes$name)-1 
+links$IDtarget <- match(links$target, nodes$name)-1
+ 
+# Make the Network
+
+cs <- 'd3.scaleOrdinal() .range(["#440154FF", "#2A788EFF", "#7AD151FF"])'
+p <- sankeyNetwork(Links = links, Nodes = nodes,
+                     Source = "IDsource", Target = "IDtarget",
+                     Value = "Freq", NodeID = "name", NodeGroup = 'nodeGroup',
+                     sinksRight=F, nodeWidth = 10, nodePadding = 30,
+                   colourScale = cs, fontSize = 12, fontFamily = 'Arial')
+
+p
+
+
+## Try it with ggalluvial
+library(ggalluvial)
+
+links.alluvial <- links.base %>%
+  select(Hylak_id:`(2014,2020]`) %>%
+  group_by(`(1984,1990]`, `(1990,1996]`, `(1996,2002]`, `(2002,2008]`, `(2008,2014]`, `(2014,2020]`) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(alluvium = row_number()) %>%
+  pivot_longer(-c(alluvium, count), names_to = 'Period', values_to = 'Cluster')
+
+
+links.alluvial %>%
+  ggplot(aes(x = factor(Period), y = count, stratum = Cluster, label = Cluster, 
+             alluvium = alluvium, fill = Cluster)) +
+  geom_flow() +
+  geom_stratum(alpha = .8) +
+  scale_fill_viridis_d(option = 'viridis', end = .8) +
+  labs(x = 'Period', y = 'Lake Proportion') + 
+  theme_classic() +
+  theme(legend.position = 'top',
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text.y = element_blank())
+
+
+ggsave('figures/transitionPlotGG.png', width = 5, height = 4, units = 'in')
+
+```
+
+## Look at stability metrics from cluster transitions
+
+```{r}
+## Pull out summary stats
+links.summary <- links %>%
+  group_by(source) %>%
+  mutate(total = sum(Freq),
+         PChange = Freq/total) %>%
+  ungroup() %>%
+  left_join(nodes, by = c('source' = 'name')) %>%
+  rename(nodeSource = nodeGroup) %>%left_join(nodes, by = c('target' = 'name')) %>%
+  rename(nodeTarget = nodeGroup) %>%
+  group_by(nodeTarget, nodeSource) %>%
+  summarise(mean = mean(PChange),
+            sd = sd(PChange))
+  
+## Get inter vs intra numbers for statistical analysis
+interVintra <- links %>%
+  group_by(source) %>%
+  mutate(total = sum(Freq),
+         PChange = Freq/total) %>%
+  ungroup() %>%
+  left_join(nodes, by = c('source' = 'name')) %>%
+  rename(nodeSource = nodeGroup) %>%left_join(nodes, by = c('target' = 'name')) %>%
+  rename(nodeTarget = nodeGroup) %>%
+  mutate(group = ifelse(nodeSource == nodeTarget, 'intra', 'inter'),
+         group = paste0(group, nodeSource))
+
+
+#Take a look at them
+interVintra %>% group_by(group) %>%
+  summarise(mean = mean(PChange),
+            sd = sd(PChange))
+
+
+kruskal.test(PChange ~ group, interVintra)
+
+dt <- FSA::dunnTest(PChange~group, data = interVintra, method = 'bonferroni')
+print(dt,  dunn.test.results = T)
+
+
+ 
+links.base <- links.base %>%
+  mutate(change1 = ifelse(`(1984,1990]` == `(1990,1996]`, 0,1),
+         change2 = ifelse(`(1990,1996]` == `(1996,2002]`, 0,1),
+         change3 = ifelse(`(1996,2002]` == `(2002,2008]`, 0,1),
+         change4 = ifelse(`(2002,2008]` == `(2008,2014]`, 0,1),
+         change5 = ifelse(`(2008,2014]` == `(2014,2020]`, 0,1),
+         totalChange = factor(change1 + change2 + change3 + change4 + change5))
+
+summary(links.base$totalChange)
+
+stability <- links.base %>% 
+  pivot_longer(`(1984,1990]`:`(2014,2020]`, names_to = 'Period', 
+               values_to = 'Cluster') %>% 
+  group_by(Hylak_id) %>% 
+  summarize(States = factor(length(unique(Cluster)), 
+                            levels = c(1:3), labels = c(1:3))) %>%
+  left_join(links.base %>% select(Hylak_id, totalChange))
+ 
+summary(stability$States)
+
+ggplot(stability, aes(x = factor(totalChange), fill = States)) + 
+  geom_bar() +
+  scale_fill_viridis_d(end = .8) +
+  labs(x = 'Number of Cluster Transitions', y = 'Lake Count', 
+       fill = 'Unique\nClusters', title = 'Lake Transitions and States') +
+  theme_bw()
+
+ggsave('figures/transitionCounts.png', width = 3, height = 3, units = 'in')
+
+
+stability <- stability %>% inner_join(hl) %>% st_as_sf() 
+
+## Bring in the GLCP
+# glcp <- read_csv('data/in/glcp.csv')
+# glcp.filt <- as.data.table(glcp)[Hylak_id %in% stability$Hylak_id]
+# write_feather(glcp.filt, 'data/in/glcpFiltered.feather')
+glcp <- read_feather('data/in/glcpFiltered.feather') %>%
+  mutate(spRatio = seasonal_km2/permanent_km2)
+
+glcp.avg <- glcp %>% group_by(Hylak_id) %>% summarise_at(vars(total_precip_mm:pop_sum, seasonal_km2, spRatio), c(mean = mean, sd = raster::cv), na.rm = T)
+
+stability <- stability %>% left_join(glcp.avg)
+
+
+## Get medians to look at regressions
+stability.long <- stability %>% st_set_geometry(NULL) %>% group_by(totalChange) %>%
+  summarise_at(vars(total_precip_mm_mean:spRatio_sd, Lake_area:Wshd_area), median, na.rm = T)
+
+stability.long <- stability.long %>% pivot_longer(total_precip_mm_mean:Wshd_area, names_to = 'Variable')
+
+lms <- stability.long %>% filter(Variable != 'spRatio_mean') %>%
+  mutate(totalChange = as.numeric(as.character(totalChange))) %>%
+  group_by(Variable) %>% 
+  nest() %>%
+  mutate(lm = purrr::map(data, ~lm(totalChange ~ value, .)),
+         summary = purrr::map(lm, broom::tidy)) %>%
+  select(-c(data,lm)) %>%
+  unnest(summary)
+
+
+
+renamer <- tibble(Variable = c(
+"total_precip_mm_mean", "mean_annual_temp_k_mean", "pop_sum_mean" , "seasonal_km2_mean",    
+"total_precip_mm_sd"  , "mean_annual_temp_k_sd"  , "pop_sum_sd"   , "seasonal_km2_sd" ,    
+"spRatio_sd"          , "Lake_area"              , "Shore_len"    , "Shore_dev"       ,    
+"Vol_total"           , "Depth_avg"              , "Dis_avg"      , "Res_time"        ,    
+"Elevation"           , "Slope_100"              , "Wshd_area"),
+namesNew = c('Mean Precip (mm)', 'Mean Temp (k)', 'Catchment Population', 'Seasonal Water (sq.km)', 'CV of Annual Precip', 'CV of Annual Temp', 'CV of Annual Population', 'CV of Seasonal Waters (sq.km)', 'Seasonal/Permanent Water Ratio', 'Lake Area (sq.km)', 'Shore Length (km)', 'Shore Development', 'Volume (cu.km)', 'Depth (m)', 'Discharge (cu.m/s)', 'Residence Time (days)', 'Elevation (m)', 'Surrounding Slope', 'Watershed Area'))
+
+lms <- lms %>% filter(term == 'value') %>% left_join(renamer)
+
+stab.sum <- stability %>% st_set_geometry(NULL) %>%
+  select(totalChange,total_precip_mm_mean:spRatio_sd, Lake_area:Wshd_area) %>%
+  pivot_longer(-totalChange, names_to = 'Variable') %>%
+  group_by(totalChange, Variable) %>%
+  summarise(mean = mean(value, na.rm = T),
+            sd = sd(value, na.rm = T),
+            quant25 = quantile(value, .25, na.rm = T),
+            quant75 = quantile(value, .75, na.rm = T),
+            median = median(value, na.rm = T)) %>% ungroup()
+
+stab.sum %>%
+  filter(Variable %in% lms$Variable[lms$p.value < 0.05]) %>%
+  left_join(renamer) %>%
+  ggplot(aes(x = totalChange, y = median)) +
+  geom_point() +
+  geom_pointrange(aes(ymin = quant25, ymax = quant75)) +
+  scale_y_continuous(trans = 'log10') +
+  theme_bw()+
+  theme(panel.grid.minor = element_blank()) +
+  labs(x = 'Stability Class (0 = More Stable, 5 = Less Stable)', y = 'Metric Medians' ) +
+  facet_wrap(~namesNew, scales = 'free', labeller = labeller(namesNew = label_wrap_gen(20)))
+
+ggsave('figures/SigCors.png', width = 6.5, units = 'in')
+
+
+mapview::mapview(links.sf, zcol = 'States')
+```
+
+
+```{r}
+links.base <- links.sf %>% st_set_geometry(NULL)
+
+var = 'Depth_avg'
+
+wilcox.test(links.base[[var]][links.base$States == 1], links.base[[var]][links.base$States == 3])
+
+p1 <- ggplot(links.sf, aes(x = totalChange, y = Vol_total)) +
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Volume (km3)') + 
+  coord_cartesian(ylim = c(.1,50)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size=4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
+
+p2 <- ggplot(links.sf, aes(x = totalChange, y = Res_time)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Residence Time') + 
+  coord_cartesian(ylim = c(10,10000)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size=4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
+
+p3 <- ggplot(links.sf, aes(x = totalChange, y = pop_sum_mean)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') +
+  labs(x = 'Stability', y = 'Catchment Population') + 
+  coord_cartesian(ylim = c(50,15000)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size=4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
+
+p4 <- ggplot(links.sf, aes(x = totalChange, y = Slope_100)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  #scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Surrounding Slope') + 
+  coord_cartesian(ylim = c(.5,4)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size= 4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
+
+p5 <- ggplot(links.sf, aes(x = totalChange, y = Depth_avg)) + 
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  #scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Average Depth (m)') + 
+  coord_cartesian(ylim = c(2,8)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size= 4, color="red", fill="red") +
+  theme(axis.title.x = element_blank())
+
+p6 <- ggplot(links.sf, aes(x = totalChange, y = total_precip_mm_mean)) +
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  labs(x = 'Stability', y = 'Mean Annual Precip (mm)') + 
+  coord_cartesian(ylim = c(3000, 10000)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size = 4, color="red", fill="red")  +
+  theme(axis.title.x = element_blank())
+
+g <- gridExtra::grid.arrange(p2,p3,p5,p6, bottom = 'Stability')
+
+ggsave('figures/LakeLandscapeMetrics.png', plot = g, width = 4, height = 4, units = 'in')
+
+ggplot(links.sf, aes(x = totalChange, y = Wshd_area)) +
+  geom_violin(draw_quantiles = c(0.25, 0.75),
+  linetype = "dashed") +
+  geom_violin(fill="transparent",draw_quantiles = 0.5) +
+  scale_y_continuous(trans = 'log10') + 
+  #labs(x = 'Stability', y = 'Mean Annual Precip (mm)') + 
+  coord_cartesian(ylim = c(.1, 100)) +
+  stat_summary(fun.y=mean, geom="point", 
+               shape=20, size = 4, color="red", fill="red")  +
+  theme(axis.title.x = element_blank())
+
+## Take another stab at her incorporating number of states too.
+ggplot(links.sf) + geom_bar(aes(x = totalChange, fill = States))
+ggplot(links.sf) + geom_sf(aes(color = as.numeric(States))) +
+  scale_color_viridis_c()
+
+
+
+```
+
+```{r}
+library(randomForest)
+df.rf <- links.sf %>% st_set_geometry(NULL) %>% na.omit() %>%
+  select(totalChange, Lake_type, Lake_area:Wshd_area, total_precip_mm_mean:spRatio_sd) %>%
+  mutate(Lake_type = factor(Lake_type),
+         uniqueID = row_number())
+
+train <- df.rf %>% group_by(totalChange) %>% sample_frac(.7)
+test <- df.rf %>% filter(!uniqueID %in% train$uniqueID)
+train <- train %>% select(-uniqueID)
+
+rf = randomForest(totalChange ~ ., data=train, ntree=100, mtry=2, importance=TRUE)
+rf
+varImpPlot(rf)
+
+prediction_for_table <- predict(rf, test %>% select(-uniqueID, States))
+
+
+caret::confusionMatrix(prediction_for_table, test$States)
+
+```
+
+
+## Make Figure showing the spatial distribution and stability of each cluster
+## Overall
+
+```{r}
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(102003) 
+
+grid <- st_make_grid(usa, cellsize = c(75000,75000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(clusters.sf %>% st_transform(st_crs(grid)), left = F)
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  mode <- ux[tab == max(tab)]
+  mode <- ifelse(length(mode) > 1, 'Mixed', as.character(mode))
+  return(as.factor(mode))
+}
+
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID) %>%
+  summarise(modalClust = Modes(cluster))
+
+gridClusters <- grid %>% inner_join(modalClust %>% 
+                                      mutate(modalClust = factor(modalClust, levels = c('Spring Greening','Summer Greening','Bimodal','Mixed'))))
+           
+#Ecoregs <- Ecoregs %>% st_simplify(dTolerance = 5000)
+ggplot(Ecoregs) + geom_sf()
+                         
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = gridClusters, aes(fill = modalClust)) +
+  geom_sf(data = Ecoregs, fill = 'transparent', color = 'red', size = 1) +
+  scale_fill_viridis_d('Modal\nCluster') +
+  ggthemes::theme_map(base_size = 11) +
+  theme(legend.position = 'bottom')
+
+
+
+ggsave('figures/DominantCluster.png', width = 4.5, height = 4, units = 'in')
+
+
+## Stability
+grid <- st_make_grid(usa, cellsize = c(50000,50000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% 
+  st_join(stability %>% inner_join(hl) %>% st_as_sf() %>% st_transform(st_crs(usa)), left = F)
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  ux[tab == max(tab)][1]
+}
+
+modalStability <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID) %>%
+  summarise(modalStab = Modes(totalChange))
+
+gridStab <- grid %>% inner_join(modalStability) %>% mutate(modalStab = as.numeric(as.character(modalStab)))
+
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = gridStab, aes(fill = modalStab)) +
+  scale_fill_gradient(low = '#108dc7', high = '#ef8e38', 'Mode State \nChanges') +
+  ggthemes::theme_map(base_size = 11) +
+  theme(legend.position = 'bottom')
+
+ggsave('figures/ModalStateChange.png', width = 3.5, height = 3.5, units = 'in')
+
+```
+
+
+## Distance Frequency Distribution
+```{r}
+## Figure out modal cluster for each lake
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  ux[tab == max(tab)][1]
+}
+
+
+modeCluster <- clusters.sf %>% st_set_geometry(NULL) %>%
+  group_by(Hylak_id) %>%
+  summarise(modeClust = Modes(cluster))
+
+## Turn it into meters so we can make sense of distances, we'll use albers equal area USA
+modeCluster <- modeCluster %>% 
+  inner_join(
+    clusters.sf %>% distinct(Hylak_id, .keep_all = T) %>% select(Hylak_id, Pour_lat, Pour_long)) %>%
+  mutate(clust.num = as.numeric(cluster)) %>% st_as_sf() %>%
+  st_transform(102003)
+
+
+## Calculate the distance matrix between a sample of clusters (this scales exponentially, so
+## memory limits get hit pretty fast)
+disSamp <- modeCluster %>% sample_frac(.3)
+dist <- st_distance(disSamp)/1000
+dist[lower.tri(dist, diag = T)] <- NA
+units(dist) <- NULL
+dist <- round(dist)
+
+## Create a matrix where each cell shows if to clusters are the same or different from each other
+sameV <- matrix(data = rep(disSamp$modeClust, nrow(disSamp)), ncol = nrow(disSamp))
+sameH <- matrix(data = rep(disSamp$modeClust, nrow(disSamp)), nrow = nrow(disSamp), byrow = T)
+same <- sameV == sameH
+same[lower.tri(same, diag = T)] <- NA
+rm(sameH,sameV)
+
+## Map a function calculating the frequency of same cluster pairs to different cluster pairs
+## at 50km intervals
+window <- seq(50,4000,50)
+
+spatialSim <- function(distance){
+  tibble(distance = distance, 
+         sameC = sum(same & dist <= distance & dist > distance -50, na.rm = T),
+         difC = sum(!same & dist <= distance & dist > distance -50, na.rm = T))
+}
+
+distFreq <- window %>% map_dfr(spatialSim)
+
+#write_feather(distFreq, 'data/out/DistanceFrequencies.feather')
+
+## Get rid of stuff cause it takes up a lot of memory
+rm(same, dist, disSamp)
+
+distFreq %>% pivot_longer(-distance, names_to = 'ClustType', values_to = 'Frequency') %>%
+  ggplot(aes(x = distance, y = Frequency, color = ClustType)) + geom_point()
+
+distFreq %>% mutate(pSame = sameC/(sameC + difC), pDif = difC/(sameC + difC)) %>% select(-sameC, -difC) %>%
+  pivot_longer(-distance, names_to = 'ClustType', values_to = 'Frequency') %>%
+  ggplot(aes(x = distance, y = Frequency, color = ClustType)) + geom_col(position = 'stack') +
+  geom_hline(aes(yintercept = .33))
+```
+
+
+
+## Look at spatial distribution of clusters
+
+```{r}
+## By period
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(102003) 
+
+grid <- st_make_grid(usa, cellsize = c(100000,100000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(clusters.sf %>% st_transform(102003), left = F)
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  mode <- ux[tab == max(tab)]
+  mode <- ifelse(length(mode) > 1, 'Mixed', as.character(mode))
+  return(as.factor(mode))
+}
+
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID, period) %>%
+  summarise(modalClust = Modes(cluster)) %>%
+  mutate(modalClust = factor(modalClust, levels = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Mixed')))
+
+grid <- grid %>% inner_join(modalClust)
+
+p1 <- ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = grid, aes(fill = modalClust)) +
+  scale_fill_viridis_d() +
+  ggthemes::theme_map(base_size = 12) +
+  labs(fill = 'Modal Cluster', tag = 'a') +
+  theme(legend.position = 'top') +
+  facet_wrap(~period)
+
+ggsave('figures/DominantCluster.png', width = 6.5, height = 4, units = 'in')
+
+
+## They look real bad together
+p2 <- distFreq %>% mutate(pDif = difC/(sameC + difC), pSame = 1-pDif) %>% 
+  ggplot(aes(x = distance)) + 
+  geom_ribbon(aes(ymax = pSame, ymin = 0, fill = 'Same\nCluster')) +
+  geom_ribbon(aes(ymax = 1, ymin = pSame, fill = 'Different\nCluster')) +
+  scale_fill_viridis_d(option = 'plasma', end =.6) +
+  coord_cartesian(xlim = c(50,3000)) +
+  geom_segment(aes(x = 50, xend = 3500, y  = .33, yend = .33, color = 'Expected\nRandom\nFrequency'), size = 1, linetype = 4) +
+  scale_color_manual(values = 'black') +
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        legend.direction = 'horizontal',
+        legend.box = 'horizontal') +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(trans = 'log10') +
+  labs(x= 'Distance Between Lakes (km)', y = 'Frequency', fill = 'Cluster Type', tag = 'b')
+
+
+g <- gridExtra::grid.arrange(p1,p2, nrow = 2, heights = c(4,1.5))
+
+ggsave('figures/DominantClusterPlusFreq.png', plot = g, width = 6.5, units = 'in')
+
+
+summary(lm(pSame~distance, data = distFreq %>% mutate(pSame = sameC/(sameC+difC))))
+```
+
+
+
+
+## Semivariogram (not used)
+
+```{r}
+clust.var.local <- gstat::variogram(clust.num~1, data = modeCluster, cutoff = 50000, width = 1000)
+
+clust.var.regional <- gstat::variogram(clust.num~1, data = modeCluster, cutoff = 2000000, width = 100000)
+fit.local <- gstat::fit.variogram(clust.var.local, model = gstat::vgm('Sph'))
+fit.regional <- gstat::fit.variogram(clust.var.regional, model = gstat::vgm('Sph'))
+
+fit.local
+fit.regional
+
+plot(clust.var.regional, fit.regoinal)
+plot(clust.var.local, fit.local)
+
+svEmp <- tibble(dist = clust.var.local$dist, gamma = clust.var.local$gamma, scale = 'Local (Within 50 km)') %>%
+  bind_rows(tibble(dist = clust.var.regional$dist, gamma = clust.var.regional$gamma, scale = 'Regional (Within 2,000 km)')) %>%
+  mutate(Type = 'Observed', dist = dist/1000) 
+
+svFit <- gstat::variogramLine(fit.local, maxdist = 50000) %>% mutate(scale = 'Local (Within 50 km)') %>%
+  bind_rows(gstat::variogramLine(fit.regoinal, 2000000) %>% mutate(scale = 'Regional (Within 2,000 km)')) %>%
+  mutate(type = 'fit') %>%
+  mutate(dist = dist/1000,
+         Type = 'Fit')
+
+ggplot() +
+  geom_point(data = svEmp, aes(x = dist, y = gamma, color = Type)) +
+  geom_line(data = svFit, aes(x = dist, y = gamma, color = Type)) +
+  scale_color_manual(values = c('red', 'black')) +
+  labs(x = expression(paste('Distance k', m^2)), y = 'Semivariance') +
+  theme_bw() +
+  facet_wrap(~scale, scales = 'free', nrow = 2) 
+
+ggsave('figures/semivariogram.png', width = 3.5, height = 3, units = 'in')
+
+
+## Pull matched fit values to measure fit
+
+local.reg <- gstat::variogramLine(fit.local, dist_vector = clust.var.local$dist) %>% bind_cols(gammaEmp = clust.var.local$gamma)
+summary(lm(gamma~gammaEmp, local.reg))
+
+regional.reg <- gstat::variogramLine(fit.regional, dist_vector = clust.var.regional$dist) %>% bind_cols(gammaEmp = clust.var.regional$gamma)
+summary(lm(gamma~gammaEmp, regional.reg))
+
+```
+
