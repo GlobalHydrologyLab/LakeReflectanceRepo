@@ -181,7 +181,9 @@ ggplot(stability, aes(x = factor(totalChange), fill = States)) +
 ggsave('figures/transitionCounts.png', width = 3, height = 3, units = 'in')
 
 
-stability <- stability %>% inner_join(hl) %>% st_as_sf() 
+stability <- stability %>% 
+  inner_join(hl %>% mutate(lwRatio = Lake_area/Wshd_area)) %>% 
+  st_as_sf() 
 
 ## Bring in the GLCP
 # glcp <- read_csv('data/in/glcp.csv')
@@ -190,19 +192,29 @@ stability <- stability %>% inner_join(hl) %>% st_as_sf()
 glcp <- read_feather('data/in/glcpFiltered.feather') %>%
   mutate(spRatio = seasonal_km2/permanent_km2)
 
-glcp.avg <- glcp %>% group_by(Hylak_id) %>% summarise_at(vars(total_precip_mm:pop_sum, seasonal_km2, spRatio), c(mean = mean, sd = raster::cv), na.rm = T)
+glcp.avg <- glcp %>% group_by(Hylak_id) %>% summarise_at(vars(mean_monthly_precip_mm:spRatio), c(mean = mean, cv = raster::cv), na.rm = T)
 
-stability <- stability %>% left_join(glcp.avg)
+stability <- stability %>% left_join(glcp.avg) 
 
+write_feather(stability %>% st_set_geometry(NULL), 'data/out/stability.feather')
+```
+
+
+```{r}
+stability <- read_feather('data/out/stability.feather')
 
 ## Get medians to look at regressions
-stability.long <- stability %>% st_set_geometry(NULL) %>% group_by(totalChange) %>%
-  summarise_at(vars(total_precip_mm_mean:spRatio_sd, Lake_area:Wshd_area), median, na.rm = T)
 
-stability.long <- stability.long %>% pivot_longer(total_precip_mm_mean:Wshd_area, names_to = 'Variable')
+names(stability)
 
-lms <- stability.long %>% filter(Variable != 'spRatio_mean') %>%
+stability.long <- stability %>% group_by(totalChange) %>%
+  summarise_at(vars(Lake_area:Wshd_area, lwRatio, total_precip_mm_mean:spRatio_cv), median, na.rm = T)
+
+stability.long <- stability.long %>% pivot_longer(Lake_area:spRatio_cv, names_to = 'Variable')
+
+lms <- stability.long %>%
   mutate(totalChange = as.numeric(as.character(totalChange))) %>%
+  filter(!Variable %in% c('Lake_area', 'Vol_src', 'Vol_res')) %>% #remove redundant variables
   group_by(Variable) %>% 
   nest() %>%
   mutate(lm = purrr::map(data, ~lm(totalChange ~ value, .)),
@@ -210,163 +222,68 @@ lms <- stability.long %>% filter(Variable != 'spRatio_mean') %>%
   select(-c(data,lm)) %>%
   unnest(summary)
 
-
+view(lms %>% filter(term == 'value'))
+unique(lms$Variable)
 
 renamer <- tibble(Variable = c(
-"total_precip_mm_mean", "mean_annual_temp_k_mean", "pop_sum_mean" , "seasonal_km2_mean",    
-"total_precip_mm_sd"  , "mean_annual_temp_k_sd"  , "pop_sum_sd"   , "seasonal_km2_sd" ,    
-"spRatio_sd"          , "Lake_area"              , "Shore_len"    , "Shore_dev"       ,    
-"Vol_total"           , "Depth_avg"              , "Dis_avg"      , "Res_time"        ,    
-"Elevation"           , "Slope_100"              , "Wshd_area"),
-namesNew = c('Mean Precip (mm)', 'Mean Temp (k)', 'Catchment Population', 'Seasonal Water (sq.km)', 'CV of Annual Precip', 'CV of Annual Temp', 'CV of Annual Population', 'CV of Seasonal Waters (sq.km)', 'Seasonal/Permanent Water Ratio', 'Lake Area (sq.km)', 'Shore Length (km)', 'Shore Development', 'Volume (cu.km)', 'Depth (m)', 'Discharge (cu.m/s)', 'Residence Time (days)', 'Elevation (m)', 'Surrounding Slope', 'Watershed Area'))
-
+"Lake_area"         , "Shore_len"            , "Shore_dev"                ,
+"Vol_total"         , "Vol_res"              , "Vol_src"                  ,
+"Depth_avg"         , "Dis_avg"              , "Res_time"                 ,
+"Elevation"         , "Slope_100"            , "Wshd_area"                ,
+"lwRatio"           , "total_precip_mm_mean" , "mean_annual_temp_k_mean"  ,
+"pop_sum_mean"      , "seasonal_km2_mean"    , "permanent_km2_mean"       ,
+"total_km2_mean"    , "spRatio_mean"         , "mean_monthly_precip_mm_cv",
+"total_precip_mm_cv", "mean_annual_temp_k_cv", "pop_sum_cv"               ,
+"seasonal_km2_cv"   , "permanent_km2_cv"     , "total_km2_cv"             ,
+"spRatio_cv"),
+namesNew = c("Lake_area"          , "Shore Length (km)"        , "Shore Development"        ,
+"Volume (cu. km)"      , "Vol_res"                  , "Vol_src"                  ,
+"Depth (m)"            , "Discharge (cu. m/s)"      , "Residence Time (days)"    ,
+"Elevation (m)"        , "Surrounding Slope"        , "Watershed Area (sq. km)"  ,
+"Lake/Watershed Ratio" , "Mean Annual Precip (mm)"  , "Mean Temperature (k)"     ,
+"Population"           , "Seasonal Water (sq. km)"  , "Permanent Waters (sq. km)",
+"Total Area (sq. km)"  , "Seasonal/Permanent Ratio" , "CV of Monthly Precip"     ,
+"CV of Annual Precip"  , "CV of Mean Annual Temp"        , "CV of Population"         ,
+"CV of Seasonal Waters", "CV of Permanent Water"    , "CV of Total Area"         ,
+"CV of Seasonal/Permanent Ratio"))
+ 
 lms <- lms %>% filter(term == 'value') %>% left_join(renamer)
 
-stab.sum <- stability %>% st_set_geometry(NULL) %>%
-  select(totalChange,total_precip_mm_mean:spRatio_sd, Lake_area:Wshd_area) %>%
+stab.sum <- stability %>%
+  select(totalChange,Lake_area:Wshd_area, lwRatio, total_precip_mm_mean:spRatio_cv) %>%
   pivot_longer(-totalChange, names_to = 'Variable') %>%
   group_by(totalChange, Variable) %>%
-  summarise(mean = mean(value, na.rm = T),
-            sd = sd(value, na.rm = T),
-            quant25 = quantile(value, .25, na.rm = T),
+  summarise(quant25 = quantile(value, .25, na.rm = T),
             quant75 = quantile(value, .75, na.rm = T),
             median = median(value, na.rm = T)) %>% ungroup()
 
 stab.sum %>%
-  filter(Variable %in% lms$Variable[lms$p.value < 0.05]) %>%
+  filter(Variable %in% lms$Variable[lms$p.value < 0.01]) %>%
   left_join(renamer) %>%
   ggplot(aes(x = totalChange, y = median)) +
   geom_point() +
   geom_pointrange(aes(ymin = quant25, ymax = quant75)) +
-  scale_y_continuous(trans = 'log10') +
+  #scale_y_continuous(trans = 'log10') +
   theme_bw()+
   theme(panel.grid.minor = element_blank()) +
   labs(x = 'Stability Class (0 = More Stable, 5 = Less Stable)', y = 'Metric Medians' ) +
-  facet_wrap(~namesNew, scales = 'free', labeller = labeller(namesNew = label_wrap_gen(20)))
+  facet_wrap(~namesNew, scales = 'free', labeller = labeller(namesNew = label_wrap_gen(15)))
 
-ggsave('figures/SigCors.png', width = 6.5, units = 'in')
-
-
-mapview::mapview(links.sf, zcol = 'States')
-```
+ggsave('figures/SigCors.png', width = 4, height = 5, units = 'in')
 
 
-```{r}
-links.base <- links.sf %>% st_set_geometry(NULL)
+lms %>% ungroup() %>%
+  select(Variable = namesNew, Coefficient = estimate, Std.Error = std.error, p.value) %>%
+  arrange(p.value) %>%
+  knitr::kable(., 'html') %>%
+  kableExtra::kable_styling("striped") %>%
+  kableExtra::as_image(width = 4, file = 'figures/lmTable.png')
 
-var = 'Depth_avg'
+  
+  # knitr::kable(., "latex", booktabs = T) %>%
+  # kableExtra::kable_styling(latex_options = c("striped", "scale_down")) %>%
+  # kableExtra::as_image(width = 8, file = 'figures/lmTable.png')
 
-wilcox.test(links.base[[var]][links.base$States == 1], links.base[[var]][links.base$States == 3])
-
-p1 <- ggplot(links.sf, aes(x = totalChange, y = Vol_total)) +
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  scale_y_continuous(trans = 'log10') + 
-  labs(x = 'Stability', y = 'Volume (km3)') + 
-  coord_cartesian(ylim = c(.1,50)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size=4, color="red", fill="red") +
-  theme(axis.title.x = element_blank())
-
-p2 <- ggplot(links.sf, aes(x = totalChange, y = Res_time)) + 
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  scale_y_continuous(trans = 'log10') + 
-  labs(x = 'Stability', y = 'Residence Time') + 
-  coord_cartesian(ylim = c(10,10000)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size=4, color="red", fill="red") +
-  theme(axis.title.x = element_blank())
-
-p3 <- ggplot(links.sf, aes(x = totalChange, y = pop_sum_mean)) + 
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  scale_y_continuous(trans = 'log10') +
-  labs(x = 'Stability', y = 'Catchment Population') + 
-  coord_cartesian(ylim = c(50,15000)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size=4, color="red", fill="red") +
-  theme(axis.title.x = element_blank())
-
-p4 <- ggplot(links.sf, aes(x = totalChange, y = Slope_100)) + 
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  #scale_y_continuous(trans = 'log10') + 
-  labs(x = 'Stability', y = 'Surrounding Slope') + 
-  coord_cartesian(ylim = c(.5,4)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size= 4, color="red", fill="red") +
-  theme(axis.title.x = element_blank())
-
-p5 <- ggplot(links.sf, aes(x = totalChange, y = Depth_avg)) + 
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  #scale_y_continuous(trans = 'log10') + 
-  labs(x = 'Stability', y = 'Average Depth (m)') + 
-  coord_cartesian(ylim = c(2,8)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size= 4, color="red", fill="red") +
-  theme(axis.title.x = element_blank())
-
-p6 <- ggplot(links.sf, aes(x = totalChange, y = total_precip_mm_mean)) +
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  scale_y_continuous(trans = 'log10') + 
-  labs(x = 'Stability', y = 'Mean Annual Precip (mm)') + 
-  coord_cartesian(ylim = c(3000, 10000)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size = 4, color="red", fill="red")  +
-  theme(axis.title.x = element_blank())
-
-g <- gridExtra::grid.arrange(p2,p3,p5,p6, bottom = 'Stability')
-
-ggsave('figures/LakeLandscapeMetrics.png', plot = g, width = 4, height = 4, units = 'in')
-
-ggplot(links.sf, aes(x = totalChange, y = Wshd_area)) +
-  geom_violin(draw_quantiles = c(0.25, 0.75),
-  linetype = "dashed") +
-  geom_violin(fill="transparent",draw_quantiles = 0.5) +
-  scale_y_continuous(trans = 'log10') + 
-  #labs(x = 'Stability', y = 'Mean Annual Precip (mm)') + 
-  coord_cartesian(ylim = c(.1, 100)) +
-  stat_summary(fun.y=mean, geom="point", 
-               shape=20, size = 4, color="red", fill="red")  +
-  theme(axis.title.x = element_blank())
-
-## Take another stab at her incorporating number of states too.
-ggplot(links.sf) + geom_bar(aes(x = totalChange, fill = States))
-ggplot(links.sf) + geom_sf(aes(color = as.numeric(States))) +
-  scale_color_viridis_c()
-
-
-
-```
-
-```{r}
-library(randomForest)
-df.rf <- links.sf %>% st_set_geometry(NULL) %>% na.omit() %>%
-  select(totalChange, Lake_type, Lake_area:Wshd_area, total_precip_mm_mean:spRatio_sd) %>%
-  mutate(Lake_type = factor(Lake_type),
-         uniqueID = row_number())
-
-train <- df.rf %>% group_by(totalChange) %>% sample_frac(.7)
-test <- df.rf %>% filter(!uniqueID %in% train$uniqueID)
-train <- train %>% select(-uniqueID)
-
-rf = randomForest(totalChange ~ ., data=train, ntree=100, mtry=2, importance=TRUE)
-rf
-varImpPlot(rf)
-
-prediction_for_table <- predict(rf, test %>% select(-uniqueID, States))
-
-
-caret::confusionMatrix(prediction_for_table, test$States)
 
 ```
 
