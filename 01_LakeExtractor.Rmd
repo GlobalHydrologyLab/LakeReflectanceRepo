@@ -15,6 +15,9 @@ library(furrr)
 library(data.table)
 library(feather)
 library(sf)
+library(ggpmisc)
+library(ggpubr)
+library(Hmisc)
 
 source('00_Functions.R')
 knitr::opts_chunk$set(echo = TRUE)
@@ -258,7 +261,7 @@ funcs.5 %>% mutate(SatCor = 'l5') %>%
   bind_rows(funcs.8 %>% mutate(SatCor = 'l8')) %>%
   write_feather(.,'data/out/landsat_correction_coefficients.feather')
 
-write_feather(refCompPre, 'data/srMunged_Original_us_hydrolakes_dp_20200628.feather')
+#write_feather(refCompPre, 'data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
 ```
 
 ## We know from previous work that even minor differences between sensors can translate to meaningful differences in dominant wavelength, so we'll apply the above corrections to the entire dataset
@@ -309,23 +312,38 @@ srCor <- refCompPre %>%
 rm(l5corr, l8corr)
 
 srCor <- as.data.table(srCor)[,dWL := fui.hue(Red, Green, Blue)]
-write_feather(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+#write_feather(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 ```
 
 
 ```{r}
+srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+refCompPre <- read_feather('data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
+
 srCor <- as.data.table(srCor)
 refCompPre <- as.data.table(refCompPre)
-correctionPlot('Blue', 'l5', refCompPre, srCor)
-correctionPlot('Green', 'l5', refCompPre, srCor)
-correctionPlot('Red', 'l5', refCompPre, srCor)
-correctionPlot('Nir', 'l5', refCompPre, srCor)
-correctionPlot('TIR1', 'l5', refCompPre, srCor)
-correctionPlot('Blue', 'l8', refCompPre, srCor)
-correctionPlot('Green', 'l8', refCompPre, srCor)
-correctionPlot('Red', 'l8', refCompPre, srCor)
-correctionPlot('Nir', 'l8', refCompPre, srCor)
-correctionPlot('TIR1', 'l8', refCompPre, srCor)
+p1 <- correctionPlot('Blue', 'l5', refCompPre, srCor)
+p2 <- correctionPlot('Green', 'l5', refCompPre, srCor)
+p3 <- correctionPlot('Red', 'l5', refCompPre, srCor)
+p4 <- correctionPlot('Nir', 'l5', refCompPre, srCor)
+#p5 <- correctionPlot('TIR1', 'l5', refCompPre, srCor)
+p6 <- correctionPlot('Blue', 'l8', refCompPre, srCor)
+p7 <- correctionPlot('Green', 'l8', refCompPre, srCor)
+p8 <- correctionPlot('Red', 'l8', refCompPre, srCor)
+p9 <- correctionPlot('Nir', 'l8', refCompPre, srCor)
+#p10 <- correctionPlot('TIR1', 'l8', refCompPre, srCor)
+
+g1 <- ggarrange(p1, p2, p3, p4, nrow = 2, ncol = 2, common.legend = T) 
+g2 <- ggarrange(p6,p7,p8,p9, nrow = 2, ncol = 2, common.legend = T)
+
+g11 <- gridExtra::grid.arrange(g1, bottom = 'Landsat 7 Surface Reflectance', left = 'Landsat 5 Surface Reflectance')
+g22 <- gridExtra::grid.arrange(g2, bottom = 'Landsat 7 Surface Reflectance', left = 'Landsat 8 Surface Reflectance')
+
+g <- gridExtra::grid.arrange(g11,g22, nrow = 2)               
+
+ggsave('figures/srCorrections.png', plot = g, width = 5.5, height = 9, units = 'in')
+
+rm(g1, g2, g11, g22, g)
 ```
 
 ## Look at some general patterns in dWL and Reflectance.
