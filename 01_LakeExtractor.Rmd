@@ -98,6 +98,9 @@ munged <- read_feather('data/processed/sr_us_hydrolakes_dp_20200628.feather')
 summary <- setDT(munged)[,.N,.(Hylak_id)]
 
 postMungeMean <- mean(summary$N)
+sd(summary$N)
+IQR(summary$N)
+
 postMungeMed <- median(summary$N)
 
 ggplot(summary, aes(x = N)) + 
@@ -108,23 +111,20 @@ ggplot(summary, aes(x = N)) +
 
 
 ##Spatial Distribution and count
-Ecoregs <- st_read('../USLakeClarityTrendr/in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+dp <- st_read('data/in/HydroLakes_DP/HydroLakes_DP.shp')
 
 hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
-  filter(Country == "United States of America",
-         Hylak_id %in% summary$Hylak_id) %>%
-  st_centroid() %>%
-  st_transform(st_crs(Ecoregs)) %>%
-  st_join(Ecoregs, left = F)
+  filter(Hylak_id %in% dp$Hylak_id) %>%
+  st_centroid()
 
 ## Check out many lakes there are vs what we have after munging
 # check <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
 #   filter(Country == "United States of America") %>%
 #   st_join(usa %>% st_transform(4326), left = F)
 
-summary.sf <- summary %>% inner_join(hl) %>% st_as_sf()
+summary.sf <- summary %>% inner_join(hl) %>% st_as_sf() %>% st_transform(102003) 
 
-usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(102003) 
 
 grid <- st_make_grid(usa, cellsize = c(50000,50000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
  
@@ -166,7 +166,7 @@ p3 <- ggplot(tempDist, aes(x = date, y = N, fill = monthLab)) +
   geom_col() + 
   annotate('text', x = ymd('1990-01-01'), y = 100000, label = 'Total Observations', fontface = 'bold') +
   scale_fill_viridis_d(option = 'cividis') + 
-  #scale_y_continuous(labels = scales::comma) +
+  scale_y_continuous(breaks = c(0, 50000, 100000), labels = c(0, '50k', '100k')) + #labels=c(10^1, 10^) +
   labs(y = 'Count', fill = 'Month') +
   ggthemes::theme_few() + 
   theme(panel.border = element_blank(),
@@ -178,7 +178,7 @@ p3 <- ggplot(tempDist, aes(x = date, y = N, fill = monthLab)) +
         legend.key.size = unit(1, 'lines'),
         legend.background = element_blank()) +
   guides(fill = guide_legend(nrow = 1, override.aes = list(size = 1)))
-
+p3
 
 layout <- rbind(c(2,3),
                 c(2,3),
@@ -361,6 +361,51 @@ gridSummary <- grid %>% st_join(srCorSummary.sf, left = F) %>%
   set_geometry(NULL) %>%
   as.data.table(.)[,ref := (Blue + Green + Red + Nir)/4
                    ][,.(medianRef = median(ref, na.rm = T), mediandWL = median(dWL, na.rm = T)), by = ID]
+
+
+```
+
+#Visualize the Deepest point for a figure
+
+```{r}
+
+hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+  filter(Hylak_id %in% dp$Hylak_id) 
+
+hl_sample <- dp %>% distinct(Hylak_id) %>% sample_n(1000)
+
+dpSamp <- dp %>% filter(Hylak_id %in% hl_sample$Hylak_id) %>%
+  mutate(Measurement = factor(type, labels = c('Centroid', 'Deepest Point'))) %>%
+  st_transform(102003)
+
+
+addBuff <- function(i){
+  point <- dpSamp[i,]
+  st_buffer(point, dist = point$distance)
+}
+
+dpBuff <- addBuff(dpSamp[1,])
+
+for(i in c(2:nrow(dpSamp))){
+  dpBuff <- rbind(dpBuff, addBuff(dpSamp[i,]))
+}
+
+dpBuff <- c(1:nrow(dpSamp)) %>% map_dfr(addBuff)
+
+mapview(dpBuff)
+
+dpBuff <- dpSamp %>%
+  mutate(geometry = split(., 1:5) %>% purrr::map(st_bbox))
+  rowwise() %>%
+  st_as_sf() %>%
+  st_buffer(., dist = distance) %>%
+  ungroup()
+
+
+hl_poly <- hl %>% filter(Hylak_id %in% hl_sample$Hylak_id) %>% st_transform(102003)
+  
+mapview(dpBuff, zcol = 'Measurement', color = 'grey60', col.regions = c('cyan','magenta'), layer.name = 'Sample Point and Associated\nDistance to Nearest Shore') + 
+  mapview(dpSamp, zcol = 'Measurement',layer.name = 'Sample Point', color = 'black', col.regions = c('cyan','magenta')) + mapview(hl_poly, col.regions = 'black', layer.name = 'Lake Polygon')
 
 
 ```
