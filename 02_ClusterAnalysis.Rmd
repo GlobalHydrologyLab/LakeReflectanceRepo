@@ -16,44 +16,14 @@ library(data.table)
 library(feather)
 library(sf)
 library(dtwclust)
-
+library(networkD3)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 # Squash it a bit
 ```{r}
 srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 
-
-smashedWeekly <- as.data.table(srCor)[, biWeek := ifelse(week %% 2 == 0,
-                                                         week-1, week)
-                                      ][, .(medWl = median(dWL),
-                         sdWl = sd(dWL), 
-                         dswe1 = mean(pCount_dswe1),
-                         dswe3 = mean(pCount_dswe3),
-                         medTir = median(TIR1),
-                         sdTir = sd(TIR1),
-                         nObs = .N), 
-                     by = .(period, biWeek, Hylak_id)]
-
-
-
-
-smashedMonthly <- as.data.table(srCor)[, .(medWl = median(dWL),
-                         sdWl = sd(dWL), 
-                         dswe1 = mean(pCount_dswe1),
-                         dswe3 = mean(pCount_dswe3),
-                         medTir = median(TIR1),
-                         sdTir = sd(TIR1),
-                         nObs = .N), 
-                     by = .(period, month, Hylak_id)]
-
-
-ggplot(smashedMonthly, aes(x = period, y = medWl, fill = factor(month))) + geom_boxplot() + scale_fill_viridis_d() + ylim(450,600)
-
-smashedMonthly %>% filter(period %in% c("(1984,1990]", "(2014,2020]")) %>%
-ggplot( aes(x = medWl,  fill = period)) + geom_density(alpha = .6) + scale_fill_viridis_d(end = .8) + xlim(450,600) + facet_wrap(~month)
-
-
+iterations = 'kmeans'
 ```
 
 ## Play around with some clustering
@@ -63,101 +33,336 @@ ggplot( aes(x = medWl,  fill = period)) + geom_density(alpha = .6) + scale_fill_
 Ecoregs <- st_read('../USLakeClarityTrendr/in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 
 hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
-  filter(Country == "United States of America") %>%
+  filter(Country == "United States of America",
+         Hylak_id %in% srCor$Hylak_id) %>%
   st_centroid() %>%
   st_transform(st_crs(Ecoregs)) %>%
   st_join(Ecoregs, left = F)
-
-sample <- hl %>% st_set_geometry(NULL) %>%
-  group_by(region) %>%
-  sample_n(1000)
-
-
-biWeekMeans <- srCor %>% filter(week > 17, week < 40, dWL > 450, dWL < 600) %>%
-  mutate(biWeek = ifelse(week %% 2 == 0, week-1, week)) %>%
-  group_by(biWeek, Hylak_id) %>%
-  summarise(dWl = mean(dWL))
-  
-counts <- biWeekMeans %>% ungroup() %>% dplyr::count(., Hylak_id) %>%
-  filter(n == 12)
-
-climatology = biWeekMeans %>% ungroup() %>% 
-  filter(Hylak_id %in% sample$Hylak_id,
-         Hylak_id %in% counts$Hylak_id) %>%
-  arrange(biWeek) %>%
-  pivot_wider(., names_from = biWeek, values_from = dWl)
-
-write_feather(climatology, 'data/out/dWLClimatologySample.feather')
-rm(biWeekMeans)
-rm(hl)
-rm(srCor)
-rm(smashedWeekly)
 ```
 
+## take a look at two different clustering methods 
+```{r}
+## Loess Smoother
+smoothin <- function(data){
+  fit <- loess(dWL ~ doy, data = data, degree = 1, span = 30/365)
+  pheno <-  tibble(doy = c(1:365), smoothed = predict(fit, tibble(doy = c(1:365))))
+  return(pheno)
+}
+
+test.k <- ksmooth(test$doy, test$dWL, kernel = 'normal', bandwidth = 14, range.x = seq(1,365), x.points = c(1:365))
+
+k.smoother <- function(data){
+ k <- ksmooth(data$doy, data$dWL, kernel = 'normal', 
+                   bandwidth = 28, range.x = seq(1,365), 
+                   x.points = seq(1,365,7))
+ pheno = tibble(doy = k$x, smoothed = k$y)
+ return(pheno)
+}
+
+
+test.out <- lakes %>% group_by(period, Hylak_id) %>%
+  nest() %>%
+  mutate(pheno = purrr::map(data, k.smoother)) %>%
+  select(-data) %>%
+  unnest(pheno)
+  
+ggplot(test.out, aes(x = doy)) + 
+  geom_point(aes(y = dWL, color = sat), data = lakes) + 
+  geom_line(aes(y = smoothed), color = 'red') +
+  facet_grid(period~Hylak_id, scales = 'free_y')
+
+fit <- loess(dWL ~ doy, data = test, degree = 1, span = 30/365)
+pheno <- tibble(doy = c(1:365), smoothed = predict(fit, tibble(doy = c(1:365))))
+
+test.out <- smoothin(test)
+
+ggplot(test.out, aes(x = doy)) + geom_line(aes(y = smoothed), color = 'red') +
+  geom_point(aes(y = dWL), data = test)
+```
+
+## Try pulling out the smoothed trend lines using doy for each period
 
 ```{r}
-c.norm <- climatology %>%
-  pivot_longer(`17`:`39`, 'biWeek') %>%
-  group_by(Hylak_id) %>%
-  mutate(value = scale(value)) %>%
-  ungroup() %>%
-  pivot_wider(names_from = biWeek, values_from = value)
+srCor <- as.data.table(srCor)[,period := cut(year,6, dig.lab = 4)
+                                ][, doy := yday(date)
+                                  ][, week := ifelse(week  == 53,52,week)
+                                    ][,biWeek := ifelse(week %% 4 == 0,
+                                                         week, week - week%%4 +4)]
 
 
-cluster_dtw<-tsclust(c.norm %>% select(-Hylak_id), type = "h", k = 2L:15L, 
-                     distance = "Euclidean",#"dtw_basic"
-                     args = tsclust_args(dist = list(window.size = 2L)),
-                     #centroid = dba, 
-                     control = hierarchical_control(method = "complete"),
-                     preproc = NULL,
-                     trace = T)
+## Find lakes with data in all 12 periods with at least 2 observations per bi-week 
+FilterCounts <- srCor[, .N, by = .(Hylak_id, period, biWeek)]
 
-## OR
+# Find all possible combos to make sure its exhaustive
+combos <- as.data.table(expand.grid(biWeek = unique(FilterCounts$biWeek), Hylak_id = unique(srCor$Hylak_id), period = unique(FilterCounts$period)))
 
-cluster_dtw <- tsclust(climatology %>% select(-Hylak_id), type = "h", k = 2L:5L, 
-                     distance = "Euclidean",#"dtw_basic"
-                     args = tsclust_args(dist = list(window.size = 2L)),
-                     #centroid = pam, 
-                     control = hierarchical_control(method = "complete"),
-                     preproc = NULL,
-                     trace = T)
+Filter <- merge(FilterCounts,combos, all = T)[is.na(N)]
 
-plot(cluster_dtw[[1]], type = "centroid") 
+lakeSamp <- srCor[!Hylak_id %in% unique(Filter$Hylak_id),.(Hylak_id, period, date, dWL, doy)
+                  ][,dWL := scale(dWL), by = .(Hylak_id, period)
+                    ][dWL < 4 & dWL > -4]
 
-# "Sil" (!): Silhouette index (Rousseeuw (1987); to be maximized).
-# "D" (!): Dunn index (Arbelaitz et al. (2013); to be maximized).
-# "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
-# "DB" (?): Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
-# "DBstar" (?): Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
-# "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
-# "SF" (~): Score Function (Saitta et al. (2007); to be maximized; see notes).
+length(unique(lakeSamp$Hylak_id))
 
-cvi_dw <- sapply(cluster_dtw, cvi, type = "internal")
+# function for nesting with data.table
+.nest <- function(...) list(data.table(...))
+
+smoothed <- lakeSamp[, .(data = .nest(.SD)),  by = .(period, Hylak_id)]
+
+tic()
+plan(multiprocess)
+smoothed <- smoothed %>%
+  as_tibble() %>%
+  mutate(kmeans = future_map(data, k.smoother, .progress = T)) %>%
+  select(-data) %>%
+  unnest(kmeans)
+plan(sequential)
+toc()
+
+vis <- smoothed %>% distinct(Hylak_id) %>% sample_n(5)
+
+ggplot(smoothed %>% filter(Hylak_id %in% vis$Hylak_id)) + 
+  geom_point(data = lakeSamp %>% filter(Hylak_id %in% vis$Hylak_id), aes(x = doy, y = dWL)) +
+  geom_line(aes(x = doy, y = smoothed), color = 'red', size = 1) + 
+  facet_grid(period~Hylak_id, scales = 'free')
+
+c.norm <- smoothed %>%
+  arrange(doy) %>%
+  pivot_wider(names_from = doy, values_from = smoothed)
+
+colSums(is.na(c.norm))
+
+## The above takes a bit to run, so save the period climatologies for later use
+write_feather(c.norm, paste0('data/out/',iterations,'_12monthNormalized.feather'))
+
+## Clustering scales exponentially with the number of inputs and maxes out at ~10,000
+## So we'll build the clustering on only half the data then apply it to the full dataset
+missing <- c.norm[rowSums(is.na(c.norm)) > 0,]
+c.norm <- c.norm %>% filter(!Hylak_id %in% missing$Hylak_id)
+
+set.seed(4235)
+sample <- c.norm %>% ungroup() %>% distinct(Hylak_id) %>% sample_n(1500)
+sample <- c.norm %>% ungroup() %>% filter(Hylak_id %in% sample$Hylak_id)
+
+##Take a quick look at the distribution
+#sample %>% inner_join(hl) %>% st_as_sf() %>% mapview::mapview(.)
+
+cluster_dtw<-tsclust(sample %>% select(-Hylak_id, -period), 
+                     type = "h", k = 2L:8L, 
+                     distance = "dtw_basic",
+                     centroid = dba,
+                     #window.size = 2L,
+                     control = hierarchical_control(method ="complete"),
+                     args = tsclust_args(dist = list(window.size = 3L),
+                                         cent = list(window.size = 3L)),
+                     preproc = NULL)
+
+# extract the cluster validation indices
+
+cvi_dw <-sapply(cluster_dtw, cvi, type = c('Sil', 'D', 'COP', 'DB', 'DBstar'))# "valid") 
 
 cvi_names <-rownames(cvi_dw)
 
 cvi_df <- cvi_dw %>%
   as_data_frame() %>%
-  cbind( cvi_names) %>%
+  cbind(cvi_names) %>%
   pivot_longer(-cvi_names, names_to="clusters", names_prefix = "V",values_to = "CVI" ) %>%
   mutate(clusters = as.numeric(clusters) +1)
 
+cvi.selects <- cvi_df %>% group_by(cvi_names) %>%
+  mutate(select= ifelse(cvi_names %in% c('CH', 'D', 'SF', 'Sil'), clusters[CVI == max(CVI)], clusters[CVI == min(CVI)]),
+         CVI = ifelse(cvi_names %in% c('CH', 'D', 'SF', 'Sil'), max(CVI), min(CVI))) %>%
+  select(-clusters) %>% distinct(cvi_names, .keep_all = T)
+
 ggplot(cvi_df) +
   geom_line(aes(x=clusters, y=CVI)) +
+  geom_point(data = cvi.selects, aes(x = select, y = CVI)) +
   facet_wrap(~cvi_names, scales="free")
 
-clusters <- hl %>% right_join(tibble(Hylak_id = c.norm$Hylak_id, cluster = predict(cluster_dtw[[3]],c.norm %>% select(-Hylak_id))))
+# The vignette to dtwclust mentions that CH and SF may not be appropriate with 
+# dba centroids, so that leaves us with COP-8 (big drop 4), D-8, DB-7,DB*-4/5, Sil-3
+plot(cluster_dtw[[2]], type = "centroid") 
 
-mapview::mapview(clusters,zcol = 'cluster')
+#We'll use 3 for parsimony
+cluster <- cluster_dtw[[2]]
+save(cluster, cvi_df, file = paste0('data/out/',iterations,'_12monthClusterings.RData'))
 
-ggplot(clusters, aes(x = factor(cluster), y = Lake_area)) + geom_boxplot() + scale_y_log10()
 
-ggplot(clusters, aes(x = factor(cluster))) + geom_bar() + facet_wrap(~region, scales = 'free')
+# "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
+# "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
+# "D" (!): Dunn index (Arbelaitz et al. (2013); to be maximized).
+# "DB" (?): Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
+# "DBstar" (?): Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
+# "SF" (~): Score Function (Saitta et al. (2007); to be maximized; see notes).
+# "Sil" (!): Silhouette index (Rousseeuw (1987); to be maximized).
 
-interactive_clustering(c.norm %>%
-                         #na.omit() %>% 
-                         select(-c(Hylak_id)))
+clusters.sf <- hl %>% inner_join(
+  tibble(Hylak_id = c.norm$Hylak_id, period = c.norm$period, 
+         cluster = predict(cluster_dtw[[2]], c.norm %>% ungroup() %>% 
+                             select(-c(Hylak_id, period)))))
+
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+ggplot() + 
+  geom_sf(data = usa) + 
+  geom_sf(data = clusters.sf, aes(color = factor(cluster), geometry = geometry), size = .5) +
+  facet_wrap(~period)
+
+mapview::mapview(clusters.sf %>% filter(period == '(2008,2020]', cluster %in% c(2,3,4)), zcol = 'cluster')
+
+lakeSamp.base <- merge(
+  srCor[Hylak_id %in% unique(c.norm$Hylak_id),.(Hylak_id, period, week, date, dWL, doy)],
+  as.data.table(clusters.sf %>% select(Hylak_id, period, cluster)))
+
+iqrs <- lakeSamp.base[,.(iqr75 = quantile(dWL, .75), 
+                         iqr25 = quantile(dWL, .25),
+                         med_dWL = median(dWL)), by = .(cluster, week)]
+
+p1 <- ggplot(iqrs, aes(x = week)) + 
+  geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
+  geom_line(aes(y = med_dWL)) +
+  facet_wrap(~cluster, ncol = 1) + 
+  labs(title = 'Raw dWL') +
+  theme_bw()
+
+ggplot(clusters.sf)
+
+clustMeds <- lakeSamp.base %>% group_by(cluster) %>% summarise(med = median(dWL))
+
+ggplot(lakeSamp.base %>% filter(dWL >400, dWL < 650), aes(x = factor(month), y = dWL)) + 
+  geom_boxplot() + geom_hline(data = clustMeds, aes(yintercept = med), color = 'red') + facet_grid(~cluster) 
+
+clusters.long <- c.norm %>% pivot_longer("1":"365", names_to = 'Week', values_to = 'norm_dWL') %>% as.data.table()
+
+clusters.long <- merge(clusters.long, as.data.table(clusters.sf %>% select(Hylak_id, period, cluster)))
+
+iqrs.norm <- clusters.long[,.(iqr75 = quantile(norm_dWL, .75), 
+                         iqr25 = quantile(norm_dWL, .25),
+                         med_dWL = median(norm_dWL)), by = .(cluster, Week)
+                         ][,Week := as.numeric(Week)]
+
+p2 <- ggplot(iqrs.norm, aes(x = Week)) + 
+  geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
+  geom_line(aes(y = med_dWL)) +
+  facet_wrap(~cluster, ncol = 1) +
+  labs(title = 'Normalized dWL') +
+  theme_bw()
+
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+
 ```
+
+
+## Try to make a transition plot
+
+```{r}
+links.base <- clusters.sf %>% st_set_geometry(NULL) %>%
+  mutate(cluster = paste0('Cluster_',cluster)) %>%
+  #mutate(pClust = paste0('c',cluster,'_',period), count = 1) %>%
+  select(Hylak_id, period, cluster) %>%
+  arrange(period) %>%
+  pivot_wider(names_from = period, values_from = cluster) 
+
+links.base[is.na(links.base)] = 'None'
+
+p1Tab <- as.data.frame(table('source' = links.base[[2]],'target' = links.base[[3]])) %>%
+  mutate(source = paste0('p1_',source), target = paste0('p2_',target))
+
+p2Tab <- as.data.frame(table('source' = links.base[[3]],'target' = links.base[[4]])) %>%
+  mutate(source = paste0('p2_',source), target = paste0('p3_',target))
+
+p3Tab <- as.data.frame(table('source' = links.base[[4]],'target' = links.base[[5]])) %>%
+  mutate(source = paste0('p3_',source), target = paste0('p4_',target))
+
+p4Tab <- as.data.frame(table('source' = links.base[[5]],'target' = links.base[[6]])) %>%
+  mutate(source = paste0('p4_',source), target = paste0('p5_',target))
+
+p5Tab <- as.data.frame(table('source' = links.base[[6]],'target' = links.base[[7]])) %>%
+  mutate(source = paste0('p5_',source), target = paste0('p6_',target))
+
+links <- bind_rows(p1Tab,p2Tab,p3Tab,p4Tab,p5Tab)
+
+nodes <- data.frame(
+  name=c(as.character(links$source), as.character(links$target)) %>% 
+    unique()
+  ) %>%
+  mutate(nodeGroup = ifelse(grepl('_1',name), 1, 
+                            ifelse(grepl('_2',name), 2, 
+                                   ifelse(grepl('_3',name),3,
+                                          ifelse(grepl('_4',name),4,
+                                                 ifelse(grepl('_5',name),5,
+                                                              ifelse(grepl('_6',name),6,7)))))),
+         nodeGroup = factor(nodeGroup))
+ 
+# With networkD3, connection must be provided using id, not using real name like in the links dataframe.. So we need to reformat it.
+links$IDsource <- match(links$source, nodes$name)-1 
+links$IDtarget <- match(links$target, nodes$name)-1
+ 
+# Make the Network
+p <- sankeyNetwork(Links = links, Nodes = nodes,
+                     Source = "IDsource", Target = "IDtarget",
+                     Value = "Freq", NodeID = "name", NodeGroup = 'nodeGroup',
+                     sinksRight=FALSE)
+
+p
+
+ 
+links.base <- links.base %>%
+  mutate(change1 = ifelse(`(1984,1996]` == `(1996,2008]`, 0,1),
+         change2 = ifelse(`(1996,2008]` == `(2008,2020]`, 0,1),
+         change3 = ifelse(`(1984,1996]` == `(2008,2020]`, 1,0),
+         totalChange = ifelse(change1 + change2 == 0, 0,change1 + change2 - change3),
+         totalChange = factor(totalChange))
+
+check <- links.base %>% pivot_longer(`(1984,1990]`:`(2014,2020]`, names_to = 'Period', values_to = 'Cluster') %>% group_by(Hylak_id) %>% summarize(States = factor(length(unique(Cluster)), levels = c(1:3), labels = c(1:3)))
+ 
+links.sf <- check %>% inner_join(hl) %>% st_as_sf() 
+links.base <- links.sf %>% st_set_geometry(NULL)
+mapview::mapview(links.sf, zcol = 'States')
+
+var = 'Wshd_area'
+
+ggplot(links.sf, aes_string(x = 'States', y = var)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability')# + coord_cartesian(y = c(0.01,100))
+
+wilcox.test(links.base[[var]][links.base$States == '1'], links.base[[var]][links.base$States == '3'])
+
+
+p1 <- ggplot(links.sf, aes(x = States, y = Vol_total)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(.01,100))
+
+p2 <- ggplot(links.sf, aes(x = States, y = Res_time)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(1,1000))
+
+p3 <- ggplot(links.sf, aes(x = States, y = Slope_100)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(.1,10))
+
+p4 <- ggplot(links.sf, aes(x = States, y = Depth_avg)) + geom_boxplot() + scale_y_continuous(trans = 'log10') + labs(x = 'Stability') + coord_cartesian(ylim = c(1,10))
+
+gridExtra::grid.arrange(p1,p2,p3,p4)
+```
+
+## See if we can perdict variability using a random forest (spoiler alert, not very well)
+
+```{r}
+library(randomForest)
+df.rf <- links.sf %>% st_set_geometry(NULL) %>%
+  select(States, Lake_type, Lake_area:Wshd_area, region) %>%
+  mutate(Lake_type = factor(Lake_type),
+         uniqueID = row_number())
+
+train <- df.rf %>% group_by(States) %>% sample_frac(.7)
+test <- df.rf %>% filter(!uniqueID %in% train$uniqueID)
+train <- train %>% select(-uniqueID)
+
+rf = randomForest(States ~ ., data=train, ntree=100, mtry=2, importance=TRUE)
+rf
+varImpPlot(rf)
+
+prediction_for_table <- predict(rf, test %>% select(-uniqueID, States))
+
+
+caret::confusionMatrix(prediction_for_table, test$States)
+
+```
+
 
 ## Monthly check
 
@@ -177,231 +382,254 @@ ggplot(hl.sf %>% filter(medWl > 450, medWl < 600)) + geom_sf(aes(color = medWl),
   scale_color_gradient(low = '#191970', high = '#3cb371') +
   facet_wrap(~month)
 
-counts <- c.monthly %>% filter(nObs > 5) %>%
-  group_by(Hylak_id) %>%
-  summarise(count = n()) %>%
-  filter(count == 12)
-
-c.monthly <- c.monthly %>% filter(Hylak_id %in% counts$Hylak_id)
-
-c.norm <- c.monthly %>%
-  group_by(Hylak_id) %>%
-  mutate(medWl = scale(medWl)) %>%
-  ungroup() %>%
-  select(Hylak_id, month, medWl) %>%
-  arrange(month) %>%
-  pivot_wider(names_from = month, values_from = medWl)
-
-
-cluster_dtw<-tsclust(c.norm %>% select(-Hylak_id), type = "h", k = 2L:6L, 
-                     distance = "Euclidean",#"dtw_basic"
-                     args = tsclust_args(dist = list(window.size = 2L)),
-                     #centroid = dba, 
-                     control = hierarchical_control(method = "complete"),
-                     preproc = NULL,
-                     trace = T)
-
-## OR
-
-cluster_dtw <- tsclust(climatology %>% select(-Hylak_id), type = "h", k = 2L:5L, 
-                     distance = "Euclidean",#"dtw_basic"
-                     args = tsclust_args(dist = list(window.size = 2L)),
-                     #centroid = pam, 
-                     control = hierarchical_control(method = "complete"),
-                     preproc = NULL,
-                     trace = T)
-
-plot(cluster_dtw[[3]], type = "centroid") 
-
-# "Sil" (!): Silhouette index (Rousseeuw (1987); to be maximized).
-# "D" (!): Dunn index (Arbelaitz et al. (2013); to be maximized).
-# "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
-# "DB" (?): Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
-# "DBstar" (?): Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
-# "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
-# "SF" (~): Score Function (Saitta et al. (2007); to be maximized; see notes).
-
-cvi_dw <- sapply(cluster_dtw, cvi, type = "DB")
-
-cvi_names <-rownames(cvi_dw)
-
-cvi_df <- cvi_dw %>%
-  as_data_frame() %>%
-  cbind(cvi_names) %>%
-  pivot_longer(-cvi_names, names_to="clusters", names_prefix = "V",values_to = "CVI" ) %>%
-  mutate(clusters = as.numeric(clusters) +1)
-
-ggplot(cvi_df) +
-  geom_line(aes(x=clusters, y=CVI)) +
-  facet_wrap(~cvi_names, scales="free")
-
-clusters <- hl %>% right_join(tibble(Hylak_id = c.norm$Hylak_id, cluster = predict(cluster_dtw[[3]],c.norm %>% select(-Hylak_id))))
-
-mapview::mapview(clusters,zcol = 'cluster')
-
-ggplot(clusters, aes(x = factor(cluster), y = Slope_100)) + geom_boxplot() + 
-  coord_cartesian(ylim = c(.01,50)) + scale_y_log10()
-
-ggplot(clusters %>% filter(!is.na(region)), aes(x = factor(cluster))) + geom_bar() + facet_wrap(~region, scales = 'free')
-
-interactive_clustering(c.norm %>%
-                         #na.omit() %>% 
-                         select(-c(Hylak_id)))
-
-
-counts <- smashedMonthly %>%
-  group_by(Hylak_id, period) %>%
-  summarise(count = n()) %>%
-  filter(count == 12)
-
-smashedMonthly <- smashedMonthly %>% filter(Hylak_id %in% counts$Hylak_id)
-
-c.norm.full <- smashedMonthly %>%
-  group_by(Hylak_id, period) %>%
-  mutate(medWl = scale(medWl)) %>%
-  ungroup() %>%
-  select(Hylak_id, month, period, medWl) %>%
-  arrange(month) %>%
-  pivot_wider(names_from = month, values_from = medWl) %>%
-  na.omit()
-
-preds.full <- c.norm.full %>% select(Hylak_id, period) %>% 
-  bind_cols(
-    tibble(cluster = predict(cluster_dtw[[3]], c.norm.full %>%
-                               select(-c(Hylak_id,period)))
-           ))
-
-
-ggplot(preds.full, aes(x = period, fill = factor(cluster))) + geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent_format()) + scale_fill_viridis_d()
 
 ```
 
 
 ```{r}
-dwl.ts <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(20:44)) %>%
-  #mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
-  select(Hylak_id, period, biWeek, medWl) %>%
-  arrange(biWeek) %>%
-  pivot_wider(., names_from = biWeek, values_from = medWl)
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
 
-cfg <- compare_clusterings_configs(
-  types = "partitional",
-  k = 2L:10L,
-  controls = list(
-    partitional = partitional_control(
-    iter.max = 50L
-    )
-  ),
-  distances = pdc_configs(
-    "distance",
-    partitional = list(
-    dtw_basic = list(
-    window.size = seq(from = 1L, to = 3L, by = 1L)#,
-    #norm = c("L1", "L2")
-    )
-    )
-  ),
-  centroids = pdc_configs(
-    "centroid",
-    partitional = list(
-    shape = list()
-    )
-  ),
-  no.expand = c(
-  "window.size"#,
-  #"norm"
-  )
-)
-evaluators <- cvi_evaluators()
-comparison <- compare_clusterings(climatology %>%
-                       select(-c(Hylak_id)),
-                   types = "partitional",
-    configs = cfg, seed = 8L, trace = T,
-    score.clus = evaluators$score,
-    pick.clus = evaluators$pick)
+grid <- st_make_grid(usa, cellsize = c(100000,100000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+grid <- grid %>% st_join(clusters.sf, left = F)
 
-```
+modalClust <- grid %>% st_set_geometry(NULL) %>%
+  group_by(ID, period) %>%
+  summarise(modalClust = Modes(cluster))
+
+grid <- grid %>% inner_join(modalClust %>% mutate(modalClust = factor(modalClust, levels = c('1','2','3','mixed'), labels = c('Bimodal', 'Summer Greening', 'Spring Greening', 'Mixed'))))
+
+ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = grid, aes(fill = modalClust)) +
+  scale_fill_viridis_d() +
+  ggthemes::theme_map(base_family = 'Arial', base_size = 12) +
+  theme(legend.position = 'bottom') +
+  facet_wrap(~period)
+
+ggsave('figures/DominantCluster.png', width = 6.5, height = 4, units = 'in')
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  mode <- ux[tab == max(tab)]
+  mode <- ifelse(length(mode) > 1, 'mixed', mode)
+  return(as.character(mode))
+}
 
 
+grid <- grid %>% st_join(clusters.sf, left = F) %>% 
+  group_by(ID, period) %>%
+  mutate(modal_clust <- getmode(cluster))
 
-```{r}
-library(dtwclust)
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
 
-dwl.ts <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(20:44)) %>%
-  #mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
-  select(Hylak_id, period, biWeek, medWl) %>%
-  arrange(biWeek) %>%
-  pivot_wider(., names_from = biWeek, values_from = medWl)
+c.monthly <- as.data.table(srCor)[, period := cut(year, 3, dig.lab = 4)
+                                  ][, color := ifelse(dWL < 500, 'blue',
+                                                    ifelse(dWL > 560, 'yellow', 'green'))
+                                  ][,.(modalColor = getmode(color),
+                                       sdColor = sd(dWL)),
+                                    by = .(period, Hylak_id)]
+                                  
+c.monthly <- as.data.table(srCor)[, period := cut(year, 3, dig.lab = 4)
+                                  ][, color := signif(dWL, 2)
+                                  ][,.(modalColor = getmode(color),
+                                       sdColor = sd(dWL)),
+                                    by = .(year, Hylak_id)]
 
-stl.ts <- stl %>% mutate(wlClean = seasonal + trend) %>%
-  select(Hylak_id, period, biWeek, wlClean) %>%
-  arrange(biWeek) %>%
-  pivot_wider(., names_from = biWeek, values_from = wlClean)
+ggplot(c.monthly) + geom_boxplot(aes(x = factor(year), y = modalColor))
+ggplot(c.monthly) + geom_boxplot(aes(x = factor(year), y = sdColor)) + ylim(0,50)
 
-# dwl.ts.scaled <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(19:45)) %>%
-#   mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
-#   select(lake_period, biWeek, medWl) %>%
-#   group_by(lake_period) %>%
-#   mutate(medWl = scale(medWl)) %>%
-#   ungroup() %>%
-#   arrange(biWeek) %>%
-#   pivot_wider(., names_from = biWeek, values_from = medWl) %>%
-#   column_to_rownames('lake_period')
+c.monthly <- as.data.table(srCor)[,period %in% c("(1984,1990]","(2014,2020]"), 
+                                  .(medWl = median(dWL),
+                                    nObs = .N),
+                                  by = .(period, month, Hylak_id)]
 
 
 
-```
-
-# Try to pull out the seasonal component first then cluster
-
-```{r}
-library(stlplus)
-
-dwl.ts <- as_tibble(smashedWeekly) %>% filter(biWeek %in% c(19:41)) %>%
-  #mutate(lake_period = paste0(Hylak_id, '_', period)) %>%
-  select(Hylak_id, period, biWeek, medWl) %>%
-  arrange(Hylak_id, period, biWeek)
-
-counts <- dplyr::count(dwl.ts, Hylak_id) %>%
-  filter(n > 68)
-
-ids <- unique(counts$Hylak_id)
-#   dwl.ts %>% filter(!Hylak_id %in% unique(counts$Hylak_id)) %>%
-#   distinct(Hylak_id)
-# ids <- unique(ids$Hylak_id)
-
-grid <- expand_grid(period = unique(dwl.ts$period), biWeek = unique(dwl.ts$biWeek), Hylak_id = ids)
-
-stl.in <- dwl.ts %>% filter(Hylak_id %in% ids) %>%
-  full_join(grid) %>% arrange(Hylak_id, period, biWeek)
-
-# check <- stl.in %>% filter(is.na(medWl)) %>%
-#   dplyr::count(., biWeek, Hylak_id)
-# 
-# check2 <- dplyr::count(check %>% filter(n == 6), biWeek)
-
-sample <- sample(ids, 5000)
-
-Sys.time()
-plan(multiprocess)
-
-stl <- stl.in %>% filter(Hylak_id %in% sample) %>%
-  group_by(Hylak_id) %>%
+c.monthly <- hl[,'Hylak_id'] %>% inner_join(c.monthly) #%>% st_cast(.,'POLYGON')
+                               
+aggregated <- c.monthly %>% 
+  group_by(period) %>%
   nest() %>%
-  mutate(stl = future_map(data, ~stlplus(x = .$medWl, n.p = 12, s.window = 5), .progress = T),
-         stl = future_map(stl, 'data')) %>%
-  #select(-data) %>%
-  unnest(cols = c(data, stl))
+  mutate(aggs = purrr::map(data, ~aggregate(., grid, getmode))) %>%
+  select(-data) %>%
+  unchop(aggs)
 
-plan(sequential)
-Sys.time()
-p1 <- ggplot(stl, aes(x = biWeek, y = seasonal + trend, color = period)) + geom_line() + 
-  facet_wrap(~Hylak_id, scales = 'free')
+test <- aggregated$aggs[[1]] %>% 
+  mutate(period ="(1984,1996]") %>% 
+  rbind(aggregated$aggs[[2]] %>% mutate(period ="(1996,2008]")) %>%
+  rbind(aggregated$aggs[[3]] %>% mutate(period =  "(2008,2020]"))
 
-p2 <- ggplot(stl, aes(x = biWeek, y = medWl, color = period)) + geom_line() + 
-  facet_wrap(~Hylak_id, scales = 'free')
+test <- test %>% st_as_sf(sf_column_name = 'geometry') %>% st_join(st_centroid(grid))
+
+ggplot(test) + geom_sf(aes(fill = modalColor)) + facet_wrap(~period)
+
+test2 <- test %>% ungroup() %>% arrange(ID, month, period) %>% 
+  mutate(ColorChange = medWl - lag(medWl)) %>%
+  filter(period != "(1984,1990]")
+
+
+colorSD <- sd(test2$ColorChange, na.rm = T)
+
+test2 %>%
+  mutate(ColorChange = ifelse(ColorChange < -colorSD, -colorSD ,ColorChange),
+         ColorChange = ifelse(ColorChange > colorSD, colorSD,ColorChange)) %>%
+  ggplot(.) +geom_sf(aes(fill = ColorChange, geometry = geometry), color = 'transparent') +
+  scale_fill_gradient(low = '#191970', high = '#3cb371') + facet_grid(period~month)
+
+ggplot(test2 %>% filter(period == "(1984,1990]")) +geom_sf(aes(fill = medWl, geometry = geometry), color = 'transparent') + scale_fill_gradient(low = '#191970', high = '#3cb371') + facet_wrap(~month)
+
+
+```
+
+```{r}
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+grid <- st_make_grid(usa, cellsize = c(100000,100000), square = F)
+
+c.monthly <- as.data.table(srCor)[,.(medWl = median(dWL),
+                                    nObs = .N),
+                                  by = .(period, month, Hylak_id)]
+
+c.monthly <- hl[,'Hylak_id'] %>% inner_join(c.monthly %>% filter(nObs > 3))
+                               
+aggregated <- c.monthly %>% 
+  group_by(month, period) %>%
+  nest() %>%
+  mutate(aggs = purrr::map(data, ~aggregate(., grid, median, na.rm = T))) %>%
+  select(-data) %>%
+  unnest(aggs)
+
+ggplot(aggregated) +geom_sf(aes(fill = medWl, geometry = geometry), color = 'transparent') + facet_grid(month~period)
+
+monthly.diffs <- aggregated %>% select(-c(nObs, Hylak_id)) %>% pivot_wider(names_from = period, values_from = medWl) %>%
+  mutate(ColorChange = `(1984,1990]`-`(2014,2020]`)
+
+colorSD <- sd(monthly.diffs$ColorChange, na.rm = T)
+
+monthly.diffs %>%
+  mutate(ColorChange = ifelse(ColorChange < -colorSD, -colorSD ,ColorChange),
+         ColorChange = ifelse(ColorChange > colorSD, colorSD,ColorChange)) %>%
+  ggplot(.) +geom_sf(aes(fill = ColorChange, geometry = geometry), color = 'transparent') +
+  scale_fill_gradient2(low = '#191970', mid = 'grey60', high = '#3cb371') + facet_wrap(~month)
+```
+
+```{r}
+
+library(gganimate)
+
+srCor %>% 
+  mutate(period2 = cut(year,6)) %>%
+  filter(dWL > 450, dWL < 600) %>%
+  ggplot(aes(x = dWL, color = period2, group = period2)) + geom_density() + 
+  scale_color_viridis_d() + facet_wrap(~month)
+
+srCor %>%
+  filter(dWL > 450, dWL < 600) %>%
+  mutate(period = ifelse(year < 2003, "1984-2002", '2003-2020')) %>%
+  ggplot(aes(x = dWL, color = period, group = period)) +
+  geom_density() +
+  # Here comes the gganimate specific bits
+  labs(title = 'Month: {frame_time}', x = 'Dominant Wavelength', y = 'Density Distributoin') +
+  transition_time(month) +
+  ease_aes('linear')
+
+sub <- srCor %>% sample_frac(.01)
+colorline <- tibble(y = -0.001, x = seq(450,600,1))
+
+#sub %>%
+p <- srCor %>%
+  filter(dWL > 450, dWL < 600) %>%
+  mutate(Period = ifelse(year < 2003, "1984-2002", '2003-2020')) %>%
+  ggplot() +
+  geom_density(aes(x = dWL, color = Period, group = Period)) +
+  geom_point(data = colorline, aes(x = x, y =  y, fill = x), shape = 21, color = 'transparent') +
+  scale_fill_gradient(low = '#191970', high = '#3cb371') +
+  scale_colour_viridis_d(option = 'plasma', end = .7) +
+  scale_x_continuous(breaks = c(500,550), labels = c('<- Bluer', 'Greener ->')) +
+  guides(fill = F) +
+  theme_bw() +
+  # Here comes the gganimate specific bits
+  labs(title = 'U.S. Lake Color by Month: {frame_time}', x = 'Lake Color', y = 'Density Distribution') +
+  transition_time(month) +
+  ease_aes('linear')
+
+anim_save('figures/ESA_MonthlyColorDist.gif', animation = p, width = 4, height = 3.5, units = 'in', res = 250)
+
+p <- srCor %>%
+  filter(dWL > 450, dWL < 600) %>%
+  ggplot() +
+  geom_density(aes(x = dWL)) +
+  geom_point(data = colorline, aes(x = x, y =  y, fill = x), shape = 21, color = 'transparent') +
+  scale_fill_gradient(low = '#191970', high = '#3cb371') +
+  scale_colour_viridis_d(option = 'plasma', end = .7) +
+  scale_x_continuous(breaks = c(500,550), labels = c('<- Bluer', 'Greener ->')) +
+  guides(fill = F) +
+  theme_bw() +
+  # Here comes the gganimate specific bits
+  labs(title = 'U.S. Lake Color by Year: {frame_time}', x = 'Lake Color', y = 'Density Distribution') +
+  transition_time(year) +
+  ease_aes('linear')
+
+anim_save('figures/ESA_YearlyColorDist.gif', animation = p, width = 4, height = 3.5, units = 'in', res = 250)
+
+```
+
+## Annual Max Min Months
+
+```{r}
+c.monthly <- as.data.table(srCor)[, .(medWl = median(dWL),
+                         sdWl = sd(dWL), 
+                         dswe1 = mean(pCount_dswe1),
+                         dswe3 = mean(pCount_dswe3),
+                         medTir = median(TIR1),
+                         sdTir = sd(TIR1),
+                         nObs = .N), 
+                     by = .(year, month, Hylak_id)]
+
+
+maxMins <- c.monthly[,.(maxMonth = month[medWl == max(medWl)][1],
+                        minMonth = month[medWl == min(medWl)][1],
+                        maxWl = max(medWl),
+                        minWl = min(medWl)),
+                     by = .(year,Hylak_id)]
+
+cor(maxMins$maxWl, maxMins$minWl)
+
+check <- maxMins[year != 2020,.(maxM = mean(maxMonth),
+                    minM = mean(minMonth),
+                    maxSD = sd(maxMonth),
+                    minSD = sd(minMonth)),
+                 by = .(year)]
+
+p1 <- ggplot(check, aes(x = year,y = maxM)) + 
+  geom_point() +
+  geom_errorbar(aes(ymax = maxM + maxSD, ymin = maxM - maxSD)) +
+  geom_smooth(method = 'lm', se = F) +
+  ggpubr::stat_cor()
+
+p2 <- ggplot(check, aes(x = year, y = minM)) + 
+  geom_point() +
+  geom_errorbar(aes(ymax = minM + minSD, ymin = minM - minSD))+
+  geom_smooth(method = 'lm', se = F) +
+  ggpubr::stat_cor()
+
 
 gridExtra::grid.arrange(p1,p2)
+
+mNds <- as.data.table(srCor)[,.(mean = mean(dWL, na.rm = T),
+                 sd = sd(dWL, na.rm = T)),
+              by = .(Hylak_id, year)]
+
+ggplot(mNds, aes(x = sd, y = mean)) + geom_hex() + scale_fill_viridis_c(trans = 'log10')
+
+ggplot(mNds, aes(x = year, y = sd)) + geom_hex() + scale_fill_viridis_c(trans = 'log10') +
+  geom_smooth(method = 'lm')
+
 
 ```
 

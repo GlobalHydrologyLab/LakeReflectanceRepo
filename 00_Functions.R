@@ -55,19 +55,30 @@ correctionPlot <- function(band, sat, dataPre, dataPost){
                                        ][[1]], seq(.01,.99,.01)))
   }
   
+  ogBias <- round(Metrics::bias(df$l7, df$Original), 3)
+  CBias <- round(Metrics::bias(df$l7, df$PostCorrection), 3)
+  
   df <- df %>% gather(Original, PostCorrection, key = "Correction", value = 'Reflectance')
   
-  ggplot(df, aes(x = l7, y = Reflectance, color = Correction)) + geom_point(alpha = .5) + 
+  ggplot(df, aes(x = l7, y = Reflectance, color = Correction)) + geom_point(alpha = .8) + 
     geom_abline(color = 'red') + 
-    scale_color_viridis_d(begin = .2, end = .8) +
-    stat_regline_equation(aes(label =  paste(..adj.rr.label..))) +
+    scale_color_viridis_d(end = .7, labels = c('Original', 'Post\nCorrection')) +
+    #stat_regline_equation(aes(label =  paste(..adj.rr.label..))) +
+    annotate('text', x= Inf, y = Inf, vjust = 4.5, hjust = 1, 
+             label = paste0('Original Bias: ', ogBias,'\nCorrected Bias: ', CBias)) +
     theme_bw() +
-    #scale_y_continuous(sec.axis = sec_axis(~.*(100/max.x), name = 'Quantile')) + 
-    labs(y = paste0(capitalize(sat), " SR"), x = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction"))
+    theme(axis.title = element_blank()) +
+    scale_y_continuous(trans = 'log10') +
+    scale_x_continuous(trans = 'log10') #
+    #labs(y = paste0(capitalize(sat), " SR"), x = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction"))
 }
   
  
 
+ggplot(tibble(x = runif(10,1,1000), y = runif(10,1,1000)), aes(x, y)) + geom_point()+
+  scale_x_continuous(trans = 'log10') +
+  scale_y_continuous(trans = 'log10') +
+  annotate('text', x = Inf, y = Inf, vjust = 5, hjust = 20, label = c('test', 'Now'))
 
 ## Old Correction plot function
 # correctionPlot <- function(band, sat){

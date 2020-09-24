@@ -15,6 +15,9 @@ library(furrr)
 library(data.table)
 library(feather)
 library(sf)
+library(ggpmisc)
+library(ggpubr)
+library(Hmisc)
 
 source('00_Functions.R')
 knitr::opts_chunk$set(echo = TRUE)
@@ -95,6 +98,9 @@ munged <- read_feather('data/processed/sr_us_hydrolakes_dp_20200628.feather')
 summary <- setDT(munged)[,.N,.(Hylak_id)]
 
 postMungeMean <- mean(summary$N)
+sd(summary$N)
+IQR(summary$N)
+
 postMungeMed <- median(summary$N)
 
 ggplot(summary, aes(x = N)) + 
@@ -102,9 +108,90 @@ ggplot(summary, aes(x = N)) +
   geom_vline(aes(xintercept = postMungeMean)) +
   theme_bw() +
   labs(title = '~22.3 Million Obs over 57k Lakes with an Average of 392 Obs per lake')
+
+
+##Spatial Distribution and count
+dp <- st_read('data/in/HydroLakes_DP/HydroLakes_DP.shp')
+
+hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+  filter(Hylak_id %in% dp$Hylak_id) %>%
+  st_centroid()
+
+## Check out many lakes there are vs what we have after munging
+# check <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+#   filter(Country == "United States of America") %>%
+#   st_join(usa %>% st_transform(4326), left = F)
+
+summary.sf <- summary %>% inner_join(hl) %>% st_as_sf() %>% st_transform(102003) 
+
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(102003) 
+
+grid <- st_make_grid(usa, cellsize = c(50000,50000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+counts.sf <- grid %>% st_join(summary.sf, left = F) %>%
+  group_by(ID) %>%
+  summarise(sumLakes = n(),
+            meanObs = median(N))
+
+tempDist <- as.data.table(munged)[, year := year(date)
+               ][, month := month(date)
+                 ][,.N, by = .(year, month)
+                   ][,date := ymd(paste0(year,'-',month,'-01'))
+                     ][, monthLab := lubridate::month(date, label = T)]
+
+p1 <- ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = counts.sf %>% mutate(sumLakes = ifelse(sumLakes > 100, 100, sumLakes)), aes(fill = sumLakes)) +
+  scale_fill_viridis_c('Number of Lakes', trans = 'log10', breaks = c(1,10,100), labels = c(1,10,'>100')) +
+  ggthemes::theme_map(base_size = 11) +
+  #labs(tag = 'B') +
+  theme(legend.position = 'top',
+        plot.margin = unit(c(0,0,-.3,0), 'null')) +
+  guides(fill = guide_colourbar(title.position="top"))
+
+
+p2 <- ggplot() + 
+  geom_sf(data = usa) +
+  geom_sf(data = counts.sf %>%
+            mutate(meanObs = ifelse(meanObs > 900, 900, meanObs)), aes(fill = meanObs)) +
+  scale_fill_viridis_c('Mean Observations per Lake', option = 'plasma', direction = -1, breaks = c(300,600,900), labels = c(300, 600, '>900')) +
+  ggthemes::theme_map(base_size = 11) +
+  #labs(tag = 'C') +
+  theme(legend.position = 'top',
+        plot.margin = unit(c(0,0,-.3,0), 'null')) +
+  guides(fill = guide_colourbar(title.position="top"))
+
+
+p3 <- ggplot(tempDist, aes(x = date, y = N, fill = monthLab)) + 
+  geom_col() + 
+  annotate('text', x = ymd('1990-01-01'), y = 100000, label = 'Total Observations', fontface = 'bold') +
+  scale_fill_viridis_d(option = 'cividis') + 
+  scale_y_continuous(breaks = c(0, 50000, 100000), labels = c(0, '50k', '100k')) + #labels=c(10^1, 10^) +
+  labs(y = 'Count', fill = 'Month') +
+  ggthemes::theme_few() + 
+  theme(panel.border = element_blank(),
+        axis.title = element_blank(),
+        legend.position = c(.46,-.4),
+        legend.title = element_blank(),
+        plot.margin = unit(c(0,0,.4,0), 'null'),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(1, 'lines'),
+        legend.background = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, override.aes = list(size = 1)))
+p3
+
+layout <- rbind(c(2,3),
+                c(2,3),
+                c(2,3),
+                c(1,1))
+
+g <- gridExtra::grid.arrange(p3,p1,p2, layout_matrix = layout)
+
+ggsave('figures/ObsDistribution.png', plot = g, width = 7, units = 'in', dpi = 300)
+
 ```
 
-# After munging, we have  a mean of `r postMungeMean` observations and median of `r postMungeMed` obeservations per lake in hydrolakes.  Now join the data to the metadata and look at potential biases between sensors.
+# After munging, we have  a mean of `r postMungeMean` observations and median of `r postMungeMed` observations per lake in hydrolakes.  Now join the data to the metadata and look at potential biases between sensors.
 
 ```{r}
 meta <- read_csv('data/SceneMetadata.csv')
@@ -117,11 +204,13 @@ refCompPre <- munged %>%
 refCompPre <- as.data.table(refCompPre)[, year := year(date)
                ][, week := week(date)
                  ][, month := month(date)
-                   ][,period :=cut (year, 6)
+                   ][,period :=cut(year, 6)
                     ][,dWLPre := fui.hue(Red, Green, Blue)
                      ][,sat := factor(sat, levels = c('LANDSAT_5','LANDSAT_7','LANDSAT_8'),
                       labels = c('l5','l7','l8'))]
 
+
+refCompPre <- refCompPre %>% sample_frac(.2)
 
 lm8 <- function(band){
   y <- refCompPre %>% 
@@ -172,7 +261,7 @@ funcs.5 %>% mutate(SatCor = 'l5') %>%
   bind_rows(funcs.8 %>% mutate(SatCor = 'l8')) %>%
   write_feather(.,'data/out/landsat_correction_coefficients.feather')
 
-write_feather(refCompPre, 'data/srMunged_Original_us_hydrolakes_dp_20200628.feather')
+#write_feather(refCompPre, 'data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
 ```
 
 ## We know from previous work that even minor differences between sensors can translate to meaningful differences in dominant wavelength, so we'll apply the above corrections to the entire dataset
@@ -223,24 +312,101 @@ srCor <- refCompPre %>%
 rm(l5corr, l8corr)
 
 srCor <- as.data.table(srCor)[,dWL := fui.hue(Red, Green, Blue)]
-write_feather(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+#write_feather(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 ```
 
 
 ```{r}
+srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+refCompPre <- read_feather('data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
+
 srCor <- as.data.table(srCor)
 refCompPre <- as.data.table(refCompPre)
-correctionPlot('Blue', 'l5', refCompPre, srCor)
-correctionPlot('Green', 'l5', refCompPre, srCor)
-correctionPlot('Red', 'l5', refCompPre, srCor)
-correctionPlot('Nir', 'l5', refCompPre, srCor)
-correctionPlot('TIR1', 'l5', refCompPre, srCor)
-correctionPlot('Blue', 'l8', refCompPre, srCor)
-correctionPlot('Green', 'l8', refCompPre, srCor)
-correctionPlot('Red', 'l8', refCompPre, srCor)
-correctionPlot('Nir', 'l8', refCompPre, srCor)
-correctionPlot('TIR1', 'l8', refCompPre, srCor)
+p1 <- correctionPlot('Blue', 'l5', refCompPre, srCor)
+p2 <- correctionPlot('Green', 'l5', refCompPre, srCor)
+p3 <- correctionPlot('Red', 'l5', refCompPre, srCor)
+p4 <- correctionPlot('Nir', 'l5', refCompPre, srCor)
+#p5 <- correctionPlot('TIR1', 'l5', refCompPre, srCor)
+p6 <- correctionPlot('Blue', 'l8', refCompPre, srCor)
+p7 <- correctionPlot('Green', 'l8', refCompPre, srCor)
+p8 <- correctionPlot('Red', 'l8', refCompPre, srCor)
+p9 <- correctionPlot('Nir', 'l8', refCompPre, srCor)
+#p10 <- correctionPlot('TIR1', 'l8', refCompPre, srCor)
+
+g1 <- ggarrange(p1, p2, p3, p4, nrow = 2, ncol = 2, common.legend = T) 
+g2 <- ggarrange(p6,p7,p8,p9, nrow = 2, ncol = 2, common.legend = T)
+
+g11 <- gridExtra::grid.arrange(g1, bottom = 'Landsat 7 Surface Reflectance', left = 'Landsat 5 Surface Reflectance')
+g22 <- gridExtra::grid.arrange(g2, bottom = 'Landsat 7 Surface Reflectance', left = 'Landsat 8 Surface Reflectance')
+
+g <- gridExtra::grid.arrange(g11,g22, nrow = 2)               
+
+ggsave('figures/srCorrections.png', plot = g, width = 5.5, height = 9, units = 'in')
+
+rm(g1, g2, g11, g22, g)
 ```
 
+## Look at some general patterns in dWL and Reflectance.
 
+```{r}
+## By period
+
+srCorSummary.sf <- merge(srCor, hl) %>% st_as_sf()
+
+usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(st_crs(hl)) 
+
+grid <- st_make_grid(usa, cellsize = c(100000,1000000), square = F) %>% st_as_sf() %>% mutate(ID = row_number())
+ 
+gridSummary <- grid %>% st_join(srCorSummary.sf, left = F) %>%
+  set_geometry(NULL) %>%
+  as.data.table(.)[,ref := (Blue + Green + Red + Nir)/4
+                   ][,.(medianRef = median(ref, na.rm = T), mediandWL = median(dWL, na.rm = T)), by = ID]
+
+
+```
+
+#Visualize the Deepest point for a figure
+
+```{r}
+
+hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
+  filter(Hylak_id %in% dp$Hylak_id) 
+
+hl_sample <- dp %>% distinct(Hylak_id) %>% sample_n(1000)
+
+dpSamp <- dp %>% filter(Hylak_id %in% hl_sample$Hylak_id) %>%
+  mutate(Measurement = factor(type, labels = c('Centroid', 'Deepest Point'))) %>%
+  st_transform(102003)
+
+
+addBuff <- function(i){
+  point <- dpSamp[i,]
+  st_buffer(point, dist = point$distance)
+}
+
+dpBuff <- addBuff(dpSamp[1,])
+
+for(i in c(2:nrow(dpSamp))){
+  dpBuff <- rbind(dpBuff, addBuff(dpSamp[i,]))
+}
+
+dpBuff <- c(1:nrow(dpSamp)) %>% map_dfr(addBuff)
+
+mapview(dpBuff)
+
+dpBuff <- dpSamp %>%
+  mutate(geometry = split(., 1:5) %>% purrr::map(st_bbox))
+  rowwise() %>%
+  st_as_sf() %>%
+  st_buffer(., dist = distance) %>%
+  ungroup()
+
+
+hl_poly <- hl %>% filter(Hylak_id %in% hl_sample$Hylak_id) %>% st_transform(102003)
+  
+mapview(dpBuff, zcol = 'Measurement', color = 'grey60', col.regions = c('cyan','magenta'), layer.name = 'Sample Point and Associated\nDistance to Nearest Shore') + 
+  mapview(dpSamp, zcol = 'Measurement',layer.name = 'Sample Point', color = 'black', col.regions = c('cyan','magenta')) + mapview(hl_poly, col.regions = 'black', layer.name = 'Lake Polygon')
+
+
+```
 
