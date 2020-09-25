@@ -192,11 +192,17 @@ stability <- stability %>%
 glcp <- read_feather('data/in/glcpFiltered.feather') %>%
   mutate(spRatio = seasonal_km2/permanent_km2)
 
+
+mapview(stability %>% inner_join(hl) %>% st_as_sf(), zcol = 'total_precip_mm_mean')
+
 glcp.avg <- glcp %>% group_by(Hylak_id) %>% summarise_at(vars(mean_monthly_precip_mm:spRatio), c(mean = mean, cv = raster::cv), na.rm = T)
 
 stability <- stability %>% left_join(glcp.avg) 
 
 write_feather(stability %>% st_set_geometry(NULL), 'data/out/stability.feather')
+
+hist(glcp$total_precip_mm)
+ggplot(glcp, aes(x = total_precip_mm)) + geom_histogram() + scale_x_log10()
 ```
 
 
@@ -206,7 +212,7 @@ stability <- read_feather('data/out/stability.feather')
 names(stability)
 
 stability.long <- stability %>% group_by(totalChange) %>%
-  summarise_at(vars(Lake_area:Wshd_area, lwRatio, total_precip_mm_mean:spRatio_cv), median, na.rm = T)
+  summarise_at(vars(Lake_area:Wshd_area, lwRatio, mean_monthly_precip_mm_mean:spRatio_cv), median, na.rm = T)
 
 stability.long <- stability.long %>% pivot_longer(Lake_area:spRatio_cv, names_to = 'Variable')
 
@@ -221,29 +227,32 @@ lms <- stability.long %>%
   unnest(summary)
 
 view(lms %>% filter(term == 'value'))
+
 unique(lms$Variable)
 
 renamer <- tibble(Variable = c(
-"Lake_area"         , "Shore_len"            , "Shore_dev"                ,
-"Vol_total"         , "Vol_res"              , "Vol_src"                  ,
-"Depth_avg"         , "Dis_avg"              , "Res_time"                 ,
-"Elevation"         , "Slope_100"            , "Wshd_area"                ,
-"lwRatio"           , "total_precip_mm_mean" , "mean_annual_temp_k_mean"  ,
-"pop_sum_mean"      , "seasonal_km2_mean"    , "permanent_km2_mean"       ,
-"total_km2_mean"    , "spRatio_mean"         , "mean_monthly_precip_mm_cv",
-"total_precip_mm_cv", "mean_annual_temp_k_cv", "pop_sum_cv"               ,
-"seasonal_km2_cv"   , "permanent_km2_cv"     , "total_km2_cv"             ,
-"spRatio_cv"),
-namesNew = c("Lake_area"          , "Shore Length (km)"        , "Shore Development"        ,
-"Volume (cu. km)"      , "Vol_res"                  , "Vol_src"                  ,
+"Shore_len"                  , "Shore_dev"                  , "Vol_total"              ,    
+"Depth_avg"                  , "Dis_avg"                    , "Res_time"               ,    
+"Elevation"                  , "Slope_100"                  , "Wshd_area"              ,    
+"lwRatio"                    , "mean_monthly_precip_mm_mean", "mean_annual_temp_k_mean", 
+"pop_sum_mean"               , "seasonal_km2_mean"          , "permanent_km2_mean"     , 
+"total_km2_mean"             , "spRatio_mean"               , "mean_monthly_precip_mm_cv",
+"mean_annual_temp_k_cv"      , "pop_sum_cv"                 , "seasonal_km2_cv"          , 
+"permanent_km2_cv"           , "total_km2_cv"               , "spRatio_cv"),
+
+namesNew = c(
+"Shore Length (km)"        , "Shore Development"    ,"Volume (cu. km)"      , 
 "Depth (m)"            , "Discharge (cu. m/s)"      , "Residence Time (days)"    ,
 "Elevation (m)"        , "Surrounding Slope"        , "Watershed Area (sq. km)"  ,
-"Lake/Watershed Ratio" , "Mean Annual Precip (mm)"  , "Mean Temperature (k)"     ,
-"Population"           , "Seasonal Water (sq. km)"  , "Permanent Waters (sq. km)",
-"Total Area (sq. km)"  , "Seasonal/Permanent Ratio" , "CV of Monthly Precip"     ,
-"CV of Annual Precip"  , "CV of Mean Annual Temp"        , "CV of Population"         ,
-"CV of Seasonal Waters", "CV of Permanent Water"    , "CV of Total Area"         ,
-"CV of Seasonal/Permanent Ratio"))
+"Lake/Watershed Ratio" , 'Mean Monthly Precip (mm)' , "Mean Temperature (k)" , 
+"Population"           , "Seasonal Water (sq. km)"  , "Permanent Waters (sq. km)", 
+"Total Area (sq. km)"  , "Seasonal/Permanent Ratio" , "CV of Monthly Precip" ,
+"CV of Mean Annual Temp", "CV of Population"        , "CV of Seasonal Waters"    , 
+"CV of Permanent Water", "CV of Total Area"         , "CV of Seasonal/Permanent Ratio"))
+
+# After talking to Michael Total_precip isn't what we thought it was.
+#"total_precip_mm_cv" ,"total_precip_mm_mean"   ,
+#"CV of Annual Precip" ,"Mean Annual Precip (mm)"  , 
 
 png(filename = 'figures/CorPlot.png', type = 'windows', width = 11, height = 10, units = 'in', res = 200)#, width = 6.5, units = 'in', type = 'windows', res = 72) 
 
@@ -253,7 +262,6 @@ corPlot <- stability %>%
   left_join(renamer) %>%
   select(namesNew, value, Hylak_id) %>%
   pivot_wider(everything(), names_from = namesNew) %>%
-  select(-c(Hylak_id, Lake_area, Vol_src, Vol_res)) %>%
   cor(., use = "complete.obs") %>%
   corrplot::corrplot(., method = 'color', type="upper", order="hclust", 
          tl.col="black", tl.srt=45, #Text label color and rotation
@@ -263,12 +271,10 @@ corPlot <- stability %>%
          diag=FALSE )
 dev.off()
 
-ggsave('figures/CorPlot.png', plot = corPlot, type = 'windows', width = 6.5, heigh = 6.5, units = 'in')
-
 lms <- lms %>% filter(term == 'value') %>% left_join(renamer)
 
 stab.sum <- stability %>%
-  select(totalChange,Lake_area:Wshd_area, lwRatio, total_precip_mm_mean:spRatio_cv) %>%
+  select(totalChange,renamer$Variable) %>%
   pivot_longer(-totalChange, names_to = 'Variable') %>%
   group_by(totalChange, Variable) %>%
   summarise(quant25 = quantile(value, .25, na.rm = T),
@@ -293,16 +299,11 @@ ggsave('figures/SigCors.png', width = 4, height = 5, units = 'in')
 lms %>% ungroup() %>%
   select(Variable = namesNew, Coefficient = estimate, Std.Error = std.error, p.value) %>%
   arrange(p.value) %>%
+  mutate_at(vars(Coefficient:p.value), ~round(.,4)) %>%
   knitr::kable(., 'html') %>%
+  kableExtra::column_spec(1:4,width = '1in') %>%
   kableExtra::kable_styling("striped") %>%
   kableExtra::as_image(width = 4, file = 'figures/lmTable.png')
-
-  
-  # knitr::kable(., "latex", booktabs = T) %>%
-  # kableExtra::kable_styling(latex_options = c("striped", "scale_down")) %>%
-  # kableExtra::as_image(width = 8, file = 'figures/lmTable.png')
-
-
 ```
 
 
