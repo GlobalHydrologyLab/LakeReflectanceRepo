@@ -25,7 +25,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 
-iterations = 'May_Oct'
+iterations = 'May_Oct_Centered'
 ## Play around with some clustering
 
 ## Take a representative sample of HydroLakes
@@ -67,8 +67,8 @@ Filter <- merge(FilterCounts,combos, all = T)[is.na(N) | N < 2]
 # Get rid of big outliers and scale dWL
 lakeSamp <- srCor[month %in% c(5:10) & !Hylak_id %in% unique(Filter$Hylak_id),
                   .(Hylak_id, period, date, dWL, doy)
-                  ][,dWL.scaled := scale(dWL), by = .(Hylak_id, period)
-                    ][dWL.scaled < 4 & dWL.scaled > -4]
+                  ][,dWL.scaled := scale(dWL, scale = F), by = .(Hylak_id, period)
+                    ]#[dWL.scaled < 4 & dWL.scaled > -4]
 
 ## This leaves us with ~26,000 lakes with at least 2 observations per month
 ## in each of the 6 periods
@@ -152,6 +152,56 @@ ggplot(vis, aes(x = doy)) +
 
 
 ggsave('figures/ClimatologyExample.png', width = 6.5, units = 'in')
+
+
+
+## Version to of figure using known lakes
+vis.samp <- tibble(LakeName = c('Mendota (WI)', 'Okeechobee (FL)', 'Tahoe (CA)', 'Crater (OR)'), Hylak_id = c(9086, 69, 792, 9092))
+# Lake name, Hylak_id
+# Trout lake, 8736
+# Mendota, 9086
+# Okeechobee, 69	
+# Tahoe, 792
+# Crater, 9092
+vis <- smoothed.raw %>% filter(Hylak_id %in% c(8736, 9086, 69, 792, 9092)) %>%
+  pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
+  group_by(Hylak_id, period) %>%
+  mutate(dWL = scale(dWL, scale = F)) %>%
+  ungroup() %>%
+  mutate(doy = as.numeric(doy)) %>%
+  left_join(vis.samp)
+
+vis <- smoothed.norm %>% filter(Hylak_id %in% c(8736, 9086, 69, 792, 9092)) %>%
+  pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
+  mutate(doy = as.numeric(doy)) %>%
+  left_join(vis.samp)
+
+
+points <- lakeSamp %>% filter(Hylak_id %in% vis$Hylak_id) %>%
+  mutate(dWL = as.integer(dWL)) %>%
+  left_join(fui.lookup) %>%
+  left_join(vis.samp) %>%
+  mutate(fui = ifelse(dWL > 583, 21, ifelse(dWL < 471,1, fui)))
+
+ggplot(vis, aes(x = doy)) + 
+  geom_point(data = points, 
+             aes(color = fui, y = dWL.scaled, fill = 'Landsat Observed Color')) +
+  geom_line(size = 1, aes(y = dWL, shape = 'Kmeans Climatology'),color = 'red', show.legend = T) +
+  scale_color_gradientn(colors = c(fui.colors), guide = 'none') +
+  # scale_color_identity(guide = 'legend',
+  #                      name = '',
+  #                      breaks = c('black', 'red'),
+  #                      labels = c('Observed Color','Kmeans Climatology')) +
+  theme_bw() +
+  #coord_cartesian(ylim = c(-2,2)) +
+  theme(legend.position = 'top', legend.title = element_blank()) +
+  labs(x = 'Day of Year', y = 'Z-Normalized Dominant Wavelength') +
+  facet_grid(LakeName~period, scales = 'free', labeller = labeller(LakeName = label_wrap_gen(10)))
+
+
+ggsave('figures/ClimatologyExample_V2.png', width = 6.5,height= 5,  units = 'in')
+
+
 ```
 
 
