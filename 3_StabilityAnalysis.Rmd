@@ -25,6 +25,8 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 clusters.sf <- st_read('data/out/clustersSF.shp')
 
+#Test with artificially creating a cluster thats basically aseasonal.
+
 links.base <- clusters.sf %>% st_set_geometry(NULL) %>%
   #mutate(cluster = paste0('Cluster_',cluster)) %>%
   #mutate(pClust = paste0('c',cluster,'_',period), count = 1) %>%
@@ -58,7 +60,7 @@ nodes <- data.frame(
   mutate(nodeGroup = ifelse(grepl('Spring',name), 1, 
                             ifelse(grepl('Summer',name), 2, 
                                    ifelse(grepl('Bimodal',name),3,
-                                          ifelse(grepl('_4',name),4,
+                                          ifelse(grepl('Aseasonal',name),4,
                                                  ifelse(grepl('_5',name),5,
                                                               ifelse(grepl('_6',name),6,7)))))),
          nodeGroup = factor(nodeGroup))
@@ -166,7 +168,7 @@ stability <- links.base %>%
                values_to = 'Cluster') %>% 
   group_by(Hylak_id) %>% 
   summarize(States = factor(length(unique(Cluster)), 
-                            levels = c(1:3), labels = c(1:3))) %>%
+                            levels = c(1:4), labels = c(1:4))) %>%
   left_join(links.base %>% select(Hylak_id, totalChange))
  
 summary(stability$States)
@@ -262,8 +264,9 @@ corPlot <- stability %>%
   left_join(renamer) %>%
   select(namesNew, value, Hylak_id) %>%
   pivot_wider(everything(), names_from = namesNew) %>%
+  select(-Hylak_id) %>%
   cor(., use = "complete.obs") %>%
-  corrplot::corrplot(., method = 'color', type="upper", order="hclust", 
+  corrplot::corrplot(., method = 'square', type="upper", order="hclust", 
          tl.col="black", tl.srt=45, #Text label color and rotation
          # Combine with significance
          #p.mat = p.mat, sig.level = 0.01, insig = "blank", 
@@ -330,7 +333,7 @@ modalClust <- grid %>% st_set_geometry(NULL) %>%
   summarise(modalClust = Modes(cluster))
 
 gridClusters <- grid %>% inner_join(modalClust %>% 
-                                      mutate(modalClust = factor(modalClust, levels = c('Spring Greening','Summer Greening','Bimodal','Mixed'))))
+                                      mutate(modalClust = factor(modalClust, levels = c('Spring Greening','Summer Greening','Bimodal','Aseasonal', 'Mixed'))))
            
 #Ecoregs <- Ecoregs %>% st_simplify(dTolerance = 5000)
 ggplot(Ecoregs) + geom_sf()
@@ -345,7 +348,7 @@ ggplot() +
 
 
 
-ggsave('figures/DominantCluster.png', width = 4.5, height = 4, units = 'in')
+ggsave('figures/DominantClusterv2.png', width = 4.5, height = 4, units = 'in')
 
 
 ## Stability
@@ -465,7 +468,7 @@ Modes <- function(x) {
 modalClust <- grid %>% st_set_geometry(NULL) %>%
   group_by(ID, period) %>%
   summarise(modalClust = Modes(cluster)) %>%
-  mutate(modalClust = factor(modalClust, levels = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Mixed')))
+  mutate(modalClust = factor(modalClust, levels = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Aseasonal', 'Mixed')))
 
 grid <- grid %>% inner_join(modalClust)
 
