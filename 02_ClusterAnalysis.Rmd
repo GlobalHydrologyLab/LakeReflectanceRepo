@@ -173,33 +173,8 @@ aseasonal %>% filter(Hylak_id %in% vis.samp$Hylak_id) %>% left_join(vis.samp)
 smoothed.norm <- read_feather(paste0('data/out/',iterations,'_Wide_Normalized.feather'))
 smoothed.raw <- read_feather(paste0('data/out/',iterations,'_Wide_Raw.feather'))
 
-vis <- smoothed.norm %>% distinct(Hylak_id) %>% sample_n(5)
-
-vis <- smoothed.norm %>% filter(Hylak_id %in% c(1050554, 105672, 1022450, 106100, 1061496)) %>% #vis$Hylak_id) %>%
-  pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
-  mutate(doy = as.numeric(doy))
-
-ggplot(vis, aes(x = doy)) + 
-  geom_point(data = lakeSamp %>% 
-               filter(Hylak_id %in% vis$Hylak_id), 
-             aes(color = 'black', y = dWL.scaled), alpha = .7) +
-  geom_line(size = 1, aes(y = dWL, color = 'red'), show.legend = T) +
-  scale_color_identity(guide = 'legend',
-                       name = '',
-                       breaks = c('black', 'red'),
-                       labels = c('Observed Color','Kmeans Climatology')) +
-  theme_bw() +
-  coord_cartesian(ylim = c(-2,2)) +
-  theme(legend.position = 'top') +
-  labs(x = 'Day of Year', y = 'Z-Normalized Dominant Wavelength') +
-  facet_grid(Hylak_id~period, scales = 'free')
-
-
-ggsave('figures/ClimatologyExample.png', width = 6.5, units = 'in')
-
-
 ## Version to of figure using known lakes
-vis.samp <- tibble(LakeName = c('Mendota (WI)', 'Okeechobee (FL)', 'Tahoe (CA)', 'Crater (OR)'), Hylak_id = c(9086, 69, 792, 9092))
+vis.samp <- tibble(LakeName = c('Mendota (WI)', 'Okeechobee (FL)', 'Crater (OR)'), Hylak_id = c(9086, 69, 9092))
 # Lake name, Hylak_id
 # Trout lake, 8736
 # Mendota, 9086
@@ -208,7 +183,7 @@ vis.samp <- tibble(LakeName = c('Mendota (WI)', 'Okeechobee (FL)', 'Tahoe (CA)',
 # Crater, 9092
 
 # Look at de-meaned but not scaled results
-vis.raw <- smoothed.raw %>% filter(Hylak_id %in% c(8736, 9086, 69, 792, 9092)) %>%
+vis.raw <- smoothed.raw %>% filter(Hylak_id %in% vis.samp$Hylak_id) %>%
   pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
   #group_by(Hylak_id, period) %>%
   #mutate(dWL = scale(dWL, scale = F)) %>%
@@ -217,13 +192,13 @@ vis.raw <- smoothed.raw %>% filter(Hylak_id %in% c(8736, 9086, 69, 792, 9092)) %
   left_join(vis.samp)
 
 
-vis.norm <- smoothed.norm %>% filter(Hylak_id %in% c(8736, 9086, 69, 792, 9092)) %>%
+vis.norm <- smoothed.norm %>% filter(Hylak_id %in% vis.samp$Hylak_id) %>%
   pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
   mutate(doy = as.numeric(doy)) %>%
   left_join(vis.samp)
 
 
-points <- lakeSamp %>% filter(Hylak_id %in% vis$Hylak_id) %>%
+points <- lakeSamp %>% filter(Hylak_id %in% vis.samp$Hylak_id) %>%
   mutate(dWL = as.integer(dWL)) %>%
   left_join(fui.lookup) %>%
   left_join(vis.samp) %>%
@@ -234,7 +209,7 @@ aseas.labs <- aseasonal %>%
   select(period, LakeName) %>%
   mutate(lab = '*', doy = 125, dWL = 590)
 
-ggplot(vis, aes(x = doy)) + 
+ggplot(vis.raw, aes(x = doy)) + 
   geom_point(data = points, 
              aes(color = fui, y = dWL, fill = 'Landsat Observed Color')) +
   geom_line(size = 1, aes(y = dWL, shape = 'Kmeans Climatology'),color = 'red', show.legend = T) +
@@ -251,7 +226,7 @@ ggplot(vis, aes(x = doy)) +
   geom_text(data = aseas.labs, aes(x = doy, y = dWL, label = lab), color = 'red', size = 5)
 
 
-ggsave('figures/ClimatologyExample_V2.png', width = 6.5,height= 5,  units = 'in')
+ggsave('figures/ClimatologyExample_V2.png', width = 6.5,height= 4,  units = 'in')
 
 ggplot(vis.norm, aes(x = doy)) + 
   geom_point(data = points, 
@@ -271,11 +246,11 @@ ggplot(vis.norm, aes(x = doy)) +
 ggsave('figures/ClimatologyExample_Norm.png', width = 6.5,height= 5,  units = 'in')
 
 
-rm(vis.raw, vis.norm, points)
+rm(vis.samp, vis.raw, vis.norm, points)
 ```
 
 
-
+## Conduct the actual clustering analysis
 
 ```{r}
 ## Check for missing values
@@ -291,8 +266,6 @@ lakes.in <- smoothed.norm %>%
 #smooothed.sf <- hl %>% inner_join(smoothed) %>% distinct(Hylak_id, .keep_all = T)
 #mapview(smoothed.sf)
 
-## There's some randomness in partitional clustering, so set the seed beforehand
-set.seed(4325)
 cluster_dtw<-tsclust(lakes.in %>% select(-Hylak_id, -period), 
                      type = "p", k = 2L:8L,#2L:8L, 
                      distance = "dtw_basic",
@@ -304,6 +277,7 @@ cluster_dtw<-tsclust(lakes.in %>% select(-Hylak_id, -period),
                      args = tsclust_args(dist = list(window.size = 2L),
                                          cent = list(window.size = 2L)),
                      preproc = NULL)
+
 
 # extract the cluster validation indices
 # The vignette to dtwclust mentions that CH and SF may not be appropriate with 
@@ -330,20 +304,31 @@ ggplot(cvi_df) +
   geom_point(data = cvi.selects, aes(x = select, y = CVI)) +
   facet_wrap(~cvi_names, scales="free")
 
+
+## There's some randomness in partitional clustering, so create the final clustering with ideal
+## number using a replicable seed
+set.seed(4986)
+cluster<-tsclust(lakes.in %>% select(-Hylak_id, -period), 
+                     type = "p", k = 3L, 
+                     distance = "dtw_basic",
+                     centroid = 'dba',
+                     #window.size = 2L,
+                     #control = hierarchical_control(method = 'complete'),
+                     control = partitional_control(iter.max = 600L),
+                     trace = T,
+                     args = tsclust_args(dist = list(window.size = 2L),
+                                         cent = list(window.size = 2L)),
+                     preproc = NULL)
+
 # Take a look at the resulting best cluster
-cluster_dtw[[2]]@centroids %>% as_tibble(.name_repair = "universal") %>% mutate(doy = seq(1,n())*7+100) %>%
+cluster@centroids %>% as_tibble(.name_repair = "universal") %>% mutate(doy = seq(1,n())*7+100) %>%
   pivot_longer(-doy, names_to = 'cluster') %>%
   ggplot() + geom_line(aes(x = doy, y = value)) + facet_wrap(~cluster)
 
 
-summary(factor(cluster_dtw[[2]]@cluster)) 
-
-#Save the resulting best cluster
-cluster <- cluster_dtw[[2]]
-
 iterations <- 'May_Oct_Aseas'
 save(cluster, cvi_df, file = paste0('data/out/',iterations,'_SummerClusterings.RData'))
-rm(cluster_dtw)
+rm(cluster_dtw, cvi_names, cvi_dw, cvi.selects, cvi_df)
 ```
 
 
@@ -364,7 +349,7 @@ Jaccard = function (x,y,z) {
 
 dtw_wrapper <- function(bootsrapped){
   
-  x.resample <- smoothed.norm %>% select(-Hylak_id, -period) %>% sample_n(nrow(smoothed), replace = T)
+  x.resample <- lakes.in %>% select(-Hylak_id, -period) %>% sample_n(nrow(lakes.in), replace = T)
   
   clust.resample<-tsclust(x.resample, 
                      type = "p", k = 3L, 
@@ -376,73 +361,54 @@ dtw_wrapper <- function(bootsrapped){
                                          cent = list(window.size = 2L)),
                      preproc = NULL)
 
-  labels.new <- predict(clust.resample, smoothed.norm %>% select(-Hylak_id, -period)) %>% unname()
+  labels.new <- predict(clust.resample, lakes.in %>% select(-Hylak_id, -period)) %>% unname()
   
-    ## Some hueristic iteration shows that the clusters centroids are always the three distinct groups with similar group sizes, but their order isn't always the same. So re-order based on group size
+  ## Some hueristic iteration shows that the clusters centroids are always the three distinct groups with similar group sizes, but their order isn't always the same. So some tricky re-ordering/labelling is needed
   
   relabler <- table(labels.og, labels.new) %>% 
     as_tibble() %>% 
-    arrange(labels.og, -n) %>%
-    distinct(labels.og, .keep_all = T)
+    #mutate(frac = ifelse(labels.og == 1, n/23578, ifelse(labels.og == 2, n/40504, n/45561))) %>% 
+    arrange(-n) 
+    
+  relabled <- relabler[1,] 
+  relabled <- relabled %>% bind_rows(
+    relabler %>% filter(labels.og != relabled$labels.og & labels.new != relabled$labels.new) %>%
+    arrange(-n) %>% .[1,])
+  relabled <- relabled %>% bind_rows(
+    relabler %>% filter(!labels.og %in% relabled$labels.og & !labels.new %in% relabled$labels.new) %>%
+      arrange(-n) %>% .[1,])
   
-  labels.new <- factor(labels.new, levels = relabler$labels.new, 
-                       labels = relabler$labels.og)
-  
+  labels.new <- factor(labels.new, levels = relabled$labels.new, 
+                       labels = relabled$labels.og)
   
   tibble(SpGr = Jaccard(labels.og, labels.new, 1),
-  SuGr = Jaccard(labels.og, labels.new, 2),
-  Bi = Jaccard(labels.og, labels.new, 3),
-  round = bootsrapped)
+  SuGr = Jaccard(labels.og, labels.new, 3),
+  Bi = Jaccard(labels.og, labels.new, 2),
+  round = bootsrapped,
+  converged = clust.resample@converged)
 }
 
 j.stability <- c(1:100) %>% map_dfr(dtw_wrapper)
 
 write_feather(j.stability, paste0('data/out/JaccardStability', iterations,'.feather'))
 
-j.summary <- j.stability %>% pivot_longer(-round, names_to = 'cluster', values_to = 'score') %>% group_by(cluster) %>% summarise(mean.Jaccard = mean(score, na.rm = T), sd.Jaccard = sd(score, na.rm = T))
+j.summary <- j.stability %>% pivot_longer(-c(round, converged), names_to = 'cluster', values_to = 'score') %>% group_by(cluster) %>% summarise(mean.Jaccard = mean(score, na.rm = T), sd.Jaccard = sd(score, na.rm = T))
 ```
 
 
 ```{r}
 load(paste0('data/out/',iterations,'_SummerClusterings.RData'))
 
-# "CH" (~): Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
-# "COP" (!): COP index (Arbelaitz et al. (2013); to be minimized).
-# "D" (!): Dunn index (Arbelaitz et al. (2013); to be maximized).
-# "DB" (?): Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
-# "DBstar" (?): Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
-# "SF" (~): Score Function (Saitta et al. (2007); to be maximized; see notes).
-# "Sil" (!): Silhouette index (Rousseeuw (1987); to be maximized).
-
 clusters.sf <- hl %>% inner_join(
   tibble(Hylak_id = lakes.in$Hylak_id, period = lakes.in$period, cluster = cluster@cluster) %>%
     bind_rows(aseasonal %>% ungroup() %>% select(Hylak_id, period) %>% mutate(cluster = 4)) %>% 
-    mutate(cluster = factor(cluster, levels = c(3,2,1,4), 
+    mutate(cluster = factor(cluster, levels = c(1,3,2,4), #c(3,2,1,4), 
                           labels = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Aseasonal'))))
-  
+
               
-#st_write(clusters.sf, paste0('data/out/',iterations,'_clustersSF.shp'))
+#st_write(clusters.sf, paste0('data/out/',iterations,'_clustersSF.shp'), delete_layer = TRUE)
 
-
-# lakeSamp.base <- merge(
-#   srCor[month %in% c(5:10) & Hylak_id %in% unique(smoothed$Hylak_id),
-#         .(Hylak_id, period, week, date, dWL, doy)],
-#   as.data.table(clusters.sf %>% select(Hylak_id, period, cluster)))
-# 
-# iqrs <- lakeSamp.base[,.(iqr75 = quantile(dWL, .75), 
-#                          iqr25 = quantile(dWL, .25),
-#                          med_dWL = median(dWL)), by = .(cluster, week)]
-# 
-# p1 <- ggplot(iqrs, aes(x = week *7)) + 
-#   geom_ribbon(aes(ymin = iqr25, ymax = iqr75), fill = 'grey70') +
-#   geom_line(aes(y = med_dWL)) +
-#   facet_wrap(~cluster, ncol = 1) + 
-#   labs(title = 'Raw', y = 'Dominant Wavelength') +
-#   theme_bw() +
-#   theme(axis.title = element_blank())
-
-
-#############
+#Visualize the clusters
 
 clusters.raw.long <- smoothed.raw %>% pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>% as.data.table()
 
@@ -464,30 +430,6 @@ getDense <- function(cl){
 ColorDense = unique(clusters.raw.long$cluster) %>% map_dfr(getDense) %>%
   mutate(cluster = factor(cluster, levels = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Aseasonal')))
   
-aseas <- clusters.raw.long[cluster == 'Aseasonal'
-                           ][,period := as.character(period)]
-
-getDense2 <- function(era){
-  df <- aseas[period == era]
-  dense <- density(df$dWL, n = 200)
-  tibble(period = era, dWL = as.integer(dense$x), dense = dense$y) %>% inner_join(fui.lookup, by = 'dWL')
-  }
-
-aseasDense = unique(aseas$period) %>% map_dfr(getDense2)
-
-ggplot(aseasDense, aes(x = dWL, y = dense, color = fui)) +
-  geom_segment(aes(xend = dWL, yend = 0), size = 2) +
-  scale_color_gradientn(colors = fui.colors) +
-  labs(tag = 'c', x = expression(lambda[d]), title = 'Density') +
-  theme(axis.line.y = element_blank(),
-      axis.ticks = element_blank(),
-      #axis.text.x = element_text(vjust = 5),
-      axis.text.y = element_blank(),
-      axis.title.y = element_blank(),
-      panel.background = element_blank(),
-      panel.grid = element_blank(),
-      legend.position = 'none') +
-  facet_wrap(~period)
 
 p1 <- ggplot(ColorDense, aes(x = dWL, y = dense, color = fui)) +
   geom_segment(aes(xend = dWL, yend = 0), size = 2) +
@@ -514,8 +456,6 @@ p2 <- ggplot(iqrs.raw, aes(x = doy)) +
         strip.background = element_blank(),
         strip.text.x = element_blank())
 
-p2
-
 ###############
 clusters.long <- smoothed.norm %>% pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'norm_dWL') %>% as.data.table()
 
@@ -535,15 +475,17 @@ p3 <- ggplot(iqrs.norm, aes(x = doy)) +
   theme(axis.title.x = element_blank(),
         strip.background = element_blank(),
         strip.text.x = element_blank())
-p3
 
 g1 <- gridExtra::grid.arrange(p3,p2,ncol = 2, widths = c(1.1,1), bottom = 'Day of Year')
 
 g <- gridExtra::grid.arrange(g1, p1, ncol = 2, widths = c(1,.5))
 
-ggsave('figures/ClusterIQRs.png',plot = g, width = 6, height = 5.5, units = 'in')
+ggsave('figures/ClusterIQRs_v2.png',plot = g, width = 6, height = 5.5, units = 'in')
+```
 
+# Pull out some descriptive numbers for each cluster
 
+```{r}
 # Just pull some summary values
 Modes <- function(x) {
   ux <- unique(x)
@@ -563,7 +505,7 @@ clusters.raw.long %>% group_by(cluster) %>%
     var = var(dWL))
 
 #Summary variation by lake
-Test <- clusters.raw.long %>% group_by(cluster, period, Hylak_id) %>%
+lake.var <- clusters.raw.long %>% group_by(cluster, period, Hylak_id) %>%
   summarise(median = median(dWL),
             sd = sd(dWL),
             cv = raster::cv(dWL),
@@ -572,7 +514,7 @@ Test <- clusters.raw.long %>% group_by(cluster, period, Hylak_id) %>%
             rangeLow = range(dWL)[1],
             rangeHigh = range(dWL)[2])
 
-Test %>%
+lake.var %>%
   group_by(cluster) %>%
   summarise(mean.sd = mean(sd),
             mean.cv = mean(cv),
@@ -581,31 +523,17 @@ Test %>%
             mean.rh = mean(rangeHigh),
             range = mean.rh - mean.rl)
 
-##Look at lake average cv and mean color
-lake.cv <- clusters.raw.long %>% group_by(Hylak_id) %>%
-  summarise(cv = raster::cv(fui),
-            fui.med = median(fui, na.rm =T),
-            sd = sd(dWL))
 
-ggplot(lake.cv, aes(y = sd, x = fui.med, color = fui.med)) + 
-  geom_point() +
-  scale_color_gradientn(colors = fui.colors) +
-  labs(x = "Median color", y = 'Lake color coefficient of variation') +
-  theme(axis.text.x = element_blank())
+kruskal.test(cv ~ cluster, lake.var)
+FSA::dunnTest(cv~cluster, data = lake.var, method = 'bonferroni')
 
-
-ggplot(Test, aes(x = cv)) + geom_density() + facet_wrap(~cluster)
-
-
-kruskal.test(cv ~ cluster, Test)
-FSA::dunnTest(cv~cluster, data = Test, method = 'bonferroni')
-
-
+# Look at median color amongst clusters
 clusters.raw.long %>% group_by(cluster) %>% summarise(median = median(dWL))
 FSA::dunnTest(dWL~cluster, data = clusters.raw.long, method = 'bonferroni')
 
 
 View(ColorDense %>% filter(cluster == 'Aseasonal'))
+View(ColorDense %>% filter(cluster == 'Bimodal'))
 ```
 
 # Finally, create Aseasonal Blue and Aseasonal Green clusters respectively
@@ -627,9 +555,4 @@ clusters.sf <- clusters.sf %>%
          cluster = factor(cluster, levels = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Aseasonal (Blue)', 'Aseasonal (Green)')))
 
 st_write(clusters.sf, paste0('data/out/',iterations,'_clustersSF.shp'), delete_layer = T)
-
 ```
-
-
-
-

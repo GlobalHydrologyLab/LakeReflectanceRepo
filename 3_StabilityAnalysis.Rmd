@@ -25,19 +25,10 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 clusters.sf <- st_read(paste0('data/out/',iterations,'_clustersSF.shp'))
 
-## Create Aseasonal Blue and Green groups Respectively)
-
-
-#Test with artificially creating a cluster thats basically aseasonal.
-
 links.base <- clusters.sf %>% st_set_geometry(NULL) %>%
-  #mutate(cluster = paste0('Cluster_',cluster)) %>%
-  #mutate(pClust = paste0('c',cluster,'_',period), count = 1) %>%
   select(Hylak_id, period, cluster) %>%
   arrange(period) %>%
   pivot_wider(names_from = period, values_from = cluster) 
-
-links.base[is.na(links.base)] = 'None'
 
 p1Tab <- as.data.frame(table('source' = links.base[[2]],'target' = links.base[[3]])) %>%
   mutate(source = paste0('p1_',source), target = paste0('p2_',target))
@@ -64,8 +55,7 @@ nodes <- data.frame(
                             ifelse(grepl('Summer',name), 2, 
                                    ifelse(grepl('Bimodal',name),3,
                                           ifelse(grepl('(Blue)',name),4,
-                                                 ifelse(grepl('(Green)',name),5,
-                                                              ifelse(grepl('_6',name),6,7)))))),
+                                                 ifelse(grepl('(Green)',name),5,NA))))),
          nodeGroup = factor(nodeGroup))
 
 groupLabels <- tibble(nodeGroup = factor(c(1:5)), label = c('Spring Greening', 'Summer Greening', 'Bimodal', 'Aseasonal (Blue)', 'Aseasonal (Green)'))
@@ -164,12 +154,10 @@ print(dt,  dunn.test.results = T)
 
 
 kruskal.test(PChange ~ group, interVintra)
-
 dt <- FSA::dunnTest(PChange~group, data = interVintra, method = 'bonferroni')
 print(dt,  dunn.test.results = T)
 
-
- 
+# Look at total number of changes
 links.base <- links.base %>%
   mutate(change1 = ifelse(`(1984,1990]` == `(1990,1996]`, 0,1),
          change2 = ifelse(`(1990,1996]` == `(1996,2002]`, 0,1),
@@ -180,6 +168,7 @@ links.base <- links.base %>%
 
 summary(links.base$totalChange)
 
+# Look at number of unique states
 stability <- links.base %>% 
   pivot_longer(`(1984,1990]`:`(2014,2020]`, names_to = 'Period', 
                values_to = 'Cluster') %>% 
@@ -199,6 +188,7 @@ ggplot(stability, aes(x = factor(totalChange), fill = States)) +
 
 ggsave('figures/transitionCounts.png', width = 3, height = 3, units = 'in')
 
+## Make a final stability dataset linked to hydrolakes and GLCP
 
 stability <- stability %>% 
   inner_join(hl %>% mutate(lwRatio = Lake_area/Wshd_area)) %>% 
@@ -208,36 +198,32 @@ stability <- stability %>%
 # glcp <- read_csv('data/in/glcp.csv')
 # glcp.filt <- as.data.table(glcp)[Hylak_id %in% stability$Hylak_id]
 # write_feather(glcp.filt, 'data/in/glcpFiltered.feather')
+
 glcp <- read_feather('data/in/glcpFiltered.feather') %>%
   mutate(spRatio = seasonal_km2/permanent_km2)
 
-
-mapview(stability %>% inner_join(hl) %>% st_as_sf(), zcol = 'total_precip_mm_mean')
-
+# Since timespans don't match up, just calculate mean as cv values for each variable
 glcp.avg <- glcp %>% group_by(Hylak_id) %>% summarise_at(vars(mean_monthly_precip_mm:spRatio), c(mean = mean, cv = raster::cv), na.rm = T)
 
 stability <- stability %>% left_join(glcp.avg) 
 
-write_feather(stability %>% st_set_geometry(NULL), 'data/out/stability.feather')
-
-hist(glcp$total_precip_mm)
-ggplot(glcp, aes(x = total_precip_mm)) + geom_histogram() + scale_x_log10()
+write_feather(stability %>% st_set_geometry(NULL), paste0('data/out/',iterations,'_stability.feather'))
 ```
 
 
 ```{r}
-stability <- read_feather('data/out/stability.feather')
+stability <- read_feather(paste0('data/out/',iterations,'_stability.feather'))
 
 names(stability)
 
 stability.long <- stability %>% group_by(totalChange) %>%
   summarise_at(vars(Lake_area:Wshd_area, lwRatio, mean_monthly_precip_mm_mean:spRatio_cv), median, na.rm = T)
-
+  
 stability.long <- stability.long %>% pivot_longer(Lake_area:spRatio_cv, names_to = 'Variable')
 
-lms <- stability.long %>%
+lms <- stability.long %>% 
   mutate(totalChange = as.numeric(as.character(totalChange))) %>%
-  filter(!Variable %in% c('Lake_area', 'Vol_src', 'Vol_res')) %>% #remove redundant variables
+  filter(!Variable %in% c('Lake_area', 'Vol_src', 'Vol_res', 'total_precip_mm_mean', 'total_precip_mm_cv')) %>% #remove redundant variables and the total precip from GLCP cause it's redundant with monthly
   group_by(Variable) %>% 
   nest() %>%
   mutate(lm = purrr::map(data, ~lm(totalChange ~ value, .)),
@@ -291,7 +277,8 @@ corPlot <- stability %>%
          diag=FALSE )
 dev.off()
 
-lms <- lms %>% filter(term == 'value') %>% left_join(renamer)
+lms <- lms %>% filter(term == 'value') %>% left_join(renamer) %>%
+  arrange(p.value)
 
 stab.sum <- stability %>%
   select(totalChange,renamer$Variable) %>%
@@ -302,34 +289,61 @@ stab.sum <- stability %>%
             median = median(value, na.rm = T)) %>% ungroup()
 
 stab.sum %>%
-  filter(Variable %in% lms$Variable[lms$p.value < 0.01]) %>%
+  filter(Variable %in% lms$Variable[lms$p.value < 0.05]) %>% #[1:6]) %>% #
   left_join(renamer) %>%
+  filter(namesNew != 'Permanent Waters (sq. km)') %>% # This is super reduntant so lets remove it.
   ggplot(aes(x = totalChange, y = median)) +
-  geom_point() +
-  geom_pointrange(aes(ymin = quant25, ymax = quant75)) +
+  #geom_point() +
+  #geom_pointrange(aes(ymin = quant25, ymax = quant75)) +
+  geom_crossbar(aes(ymin = quant25, ymax = quant75), fill = 'grey95') +
   #scale_y_continuous(trans = 'log10') +
   theme_bw()+
   theme(panel.grid.minor = element_blank()) +
   labs(x = 'Stability Class (0 = More Stable, 5 = Less Stable)', y = 'Metric Medians' ) +
   facet_wrap(~namesNew, scales = 'free', labeller = labeller(namesNew = label_wrap_gen(15)))
 
-ggsave('figures/SigCors.png', width = 4, height = 5, units = 'in')
-
+ggsave('figures/SigCors_v2.png', width = 4, height = 4, units = 'in')
 
 lms %>% ungroup() %>%
   select(Variable = namesNew, Coefficient = estimate, Std.Error = std.error, p.value) %>%
   arrange(p.value) %>%
-  mutate_at(vars(Coefficient:p.value), ~round(.,4)) %>%
+  mutate_at(vars(Coefficient:p.value), ~round(.,3)) %>%
   knitr::kable(., 'html') %>%
   kableExtra::column_spec(1:4,width = '1in') %>%
   kableExtra::kable_styling("striped") %>%
   kableExtra::as_image(width = 4, file = 'figures/lmTable.png')
 ```
 
+# See if we can predict clusters for super stable lakes
+
+```{r}
+stable.ids <-  stability %>% filter(States == 1)
+
+stable.lakes <- clusters.sf %>% st_set_geometry(NULL) %>%
+  filter(Hylak_id %in% stable.ids$Hylak_id) %>%
+  select(-c(period,lpID)) %>%
+  distinct() %>%
+  left_join(glcp.avg) %>%
+  mutate(uniqueID = c(1:nrow(.))) %>%
+  select(-c(Lake_name:Grand_id, Pour_long, Pour_lat, Hylak_id)) %>%
+  na.omit()
+
+library(randomForest)
+
+train <- stable.lakes %>% group_by(cluster) %>% sample_frac(.7)
+test <- stable.lakes %>% filter(!uniqueID %in% train$uniqueID)
+train <- train %>% select(-uniqueID)
+rf = randomForest(cluster ~ ., data=train, ntree=100, mtry=2, importance=TRUE)
+rf
+varImpPlot(rf)
+prediction_for_table <- predict(rf, test %>% select(-uniqueID))
+caret::confusionMatrix(prediction_for_table, test$cluster)
+
+```
+
 
 ## Make Figure showing the spatial distribution and stability of each cluster
 ## Overall
-
 ```{r}
 usa <- maps::map('usa', plot = F) %>% st_as_sf() %>% st_transform(102003) 
 
@@ -529,6 +543,3 @@ ggsave('figures/DominantClusterPlusFreq_v2.png', plot = g, width = 6.5, height =
 
 summary(lm(pSame~distance, data = distFreq %>% mutate(pSame = sameC/(sameC+difC))))
 ```
-
-
-
