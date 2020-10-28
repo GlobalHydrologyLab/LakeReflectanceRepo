@@ -26,6 +26,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Pull in the LimnoSat-US database, HydroLakes, and the deepest points shapefile
 
 ```{r}
+## LimnoSat database available at https://zenodo.org/record/4139695#.X5mCDIhKhhE
 srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 
 iterations = 'May_Oct'
