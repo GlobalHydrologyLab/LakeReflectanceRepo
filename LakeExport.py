@@ -20,6 +20,7 @@ exec(open('GEE_pull_functions.py').read())
 
 ## Bring in EE Assets
 # Deepest point for CONUS Hydrolakes from Xiao Yang
+# Code available https://zenodo.org/record/4136755#.X5d54pNKgUE
 dp = (ee.FeatureCollection('users/eeProject/HydroLAKES_newct_NA_e5e5da51107417d472452564cef3eb4f')
   .filterMetadata('type','equals','dp')
   .filterMetadata('distance', "greater_than", 60))
@@ -96,7 +97,7 @@ for tiles in pr:
     dataOut.start()
     counter = counter + 1
     done.append(tiles)
-    print('done_' + str(counter + tiles))
+    print('done_' + str(counter) + '_' + str(tiles)))
         
 #%%
 

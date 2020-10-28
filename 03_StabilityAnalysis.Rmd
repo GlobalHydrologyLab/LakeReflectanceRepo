@@ -62,12 +62,12 @@ groupLabels <- tibble(nodeGroup = factor(c(1:5)), label = c('Spring Greening', '
 
 nodes <- nodes %>% left_join(groupLabels)
  
-# With networkD3, connection must be provided using id, not using real name like in the links dataframe.. So we need to reformat it.
+# With networkD3, connection must be provided using id, not using real name like in the links dataframe. So we need to reformat it.
 links$IDsource <- match(links$source, nodes$name)-1 
 links$IDtarget <- match(links$target, nodes$name)-1
  
 # Make the Network
-
+# Define the color scale
 cs <- 'd3.scaleOrdinal() .range(["#440154FF", "#2A788EFF", "#7AD151FF"])'
 p <- sankeyNetwork(Links = links, Nodes = nodes,
                      Source = "IDsource", Target = "IDtarget",
@@ -195,6 +195,7 @@ stability <- stability %>%
   st_as_sf() 
 
 ## Bring in the GLCP
+## Available at https://environmentaldatainitiative.org/edis-featured-data-contributions/glcp-dataset/
 # glcp <- read_csv('data/in/glcp.csv')
 # glcp.filt <- as.data.table(glcp)[Hylak_id %in% stability$Hylak_id]
 # write_feather(glcp.filt, 'data/in/glcpFiltered.feather')
@@ -210,6 +211,7 @@ stability <- stability %>% left_join(glcp.avg)
 write_feather(stability %>% st_set_geometry(NULL), paste0('data/out/',iterations,'_stability.feather'))
 ```
 
+## Look at the relationships between stability and lake and landscape variables
 
 ```{r}
 stability <- read_feather(paste0('data/out/',iterations,'_stability.feather'))
@@ -255,10 +257,12 @@ namesNew = c(
 "CV of Mean Annual Temp", "CV of Population"        , "CV of Seasonal Waters"    , 
 "CV of Permanent Water", "CV of Total Area"         , "CV of Seasonal/Permanent Ratio"))
 
-# After talking to Michael Total_precip isn't what we thought it was.
+# After talking to Michael from GLCP, Total_precip isn't what we thought it was, so remove it.
 #"total_precip_mm_cv" ,"total_precip_mm_mean"   ,
 #"CV of Annual Precip" ,"Mean Annual Precip (mm)"  , 
 
+
+# Look at cross-correlations
 png(filename = 'figures/CorPlot.png', type = 'windows', width = 11, height = 10, units = 'in', res = 200)#, width = 6.5, units = 'in', type = 'windows', res = 72) 
 
 corPlot <- stability %>%
@@ -314,33 +318,6 @@ lms %>% ungroup() %>%
   kableExtra::as_image(width = 4, file = 'figures/lmTable.png')
 ```
 
-# See if we can predict clusters for super stable lakes
-
-```{r}
-stable.ids <-  stability %>% filter(States == 1)
-
-stable.lakes <- clusters.sf %>% st_set_geometry(NULL) %>%
-  filter(Hylak_id %in% stable.ids$Hylak_id) %>%
-  select(-c(period,lpID)) %>%
-  distinct() %>%
-  left_join(glcp.avg) %>%
-  mutate(uniqueID = c(1:nrow(.))) %>%
-  select(-c(Lake_name:Grand_id, Pour_long, Pour_lat, Hylak_id)) %>%
-  na.omit()
-
-library(randomForest)
-
-train <- stable.lakes %>% group_by(cluster) %>% sample_frac(.7)
-test <- stable.lakes %>% filter(!uniqueID %in% train$uniqueID)
-train <- train %>% select(-uniqueID)
-rf = randomForest(cluster ~ ., data=train, ntree=100, mtry=2, importance=TRUE)
-rf
-varImpPlot(rf)
-prediction_for_table <- predict(rf, test %>% select(-uniqueID))
-caret::confusionMatrix(prediction_for_table, test$cluster)
-
-```
-
 
 ## Make Figure showing the spatial distribution and stability of each cluster
 ## Overall
@@ -366,9 +343,6 @@ modalClust <- grid %>% st_set_geometry(NULL) %>%
 gridClusters <- grid %>% inner_join(modalClust %>% 
                                       mutate(modalClust = factor(modalClust, levels = c('Spring Greening','Summer Greening','Bimodal','Aseasonal', 'Mixed'))))
            
-#Ecoregs <- Ecoregs %>% st_simplify(dTolerance = 5000)
-ggplot(Ecoregs) + geom_sf()
-                         
 ggplot() + 
   geom_sf(data = usa) +
   geom_sf(data = gridClusters, aes(fill = modalClust)) +
@@ -376,7 +350,6 @@ ggplot() +
   scale_fill_viridis_d('Modal\nCluster') +
   ggthemes::theme_map(base_size = 11) +
   theme(legend.position = 'bottom')
-
 
 
 ggsave('figures/DominantClusterv2.png', width = 4.5, height = 4, units = 'in')
@@ -411,8 +384,8 @@ ggsave('figures/ModalStateChange.png', width = 3.5, height = 3.5, units = 'in')
 
 ```
 
+## Distance frequency distribution to examine spatial autocorrelation
 
-## Distance Frequency Distribution
 ```{r}
 ## Figure out modal cluster for each lake
 
@@ -504,10 +477,6 @@ grid <- grid %>% inner_join(modalClust)
 p1 <- ggplot() + 
   geom_sf(data = usa, fill = 'grey90') +
   geom_sf(data = grid, aes(fill = modalClust)) +
-  #scale_fill_viridis_d() +
-  #scale_fill_manual(values = c(viridis::plasma(5, end = .92, direction = -1), 'grey70')) + 
-  #scale_fill_manual(values = c(RColorBrewer::brewer.pal(5, 'Set2'), 'grey70')) +
- # scale_fill_manual(values = c(  "#440154FF", "#DEE318FF","#c44b28", "#3C4F8AFF", "#49C16DFF", 'grey60'))+
   scale_fill_manual(values = c("#5F4690", "#EDAD08","#CC503E", "#38A6A5", "#73AF48", 'grey70'))+
   ggthemes::theme_map(base_size = 12) +
   labs(fill = 'Modal Cluster', tag = 'a') +

@@ -23,7 +23,7 @@ def UnpackAll(bitBand, bitInfo):
 def clipImage(image):
   return image.clip(lake.geometry())
 
-## These functions all go into calculating the USGS Dynamic water m
+## These functions all go into calculating the USGS Dynamic water
 
 # def AddFmask(image):
 
@@ -177,7 +177,7 @@ def removeGeo(i):
     return i.setGeometry(None)
 ## Create water mask and extract lake medians
 
-## Double check hillshade vs shadow
+## Set up the reflectance pull
 def RefPull(image):
     f = AddFmask(image).select('fmask')
     clouds = f.gte(2).rename('clouds')
@@ -205,8 +205,6 @@ def RefPull(image):
     .combine(ee.Reducer.count().unweighted().forEachBand(pixOut.select(['dswe3', 'dswe1'])), 'pCount_', False)
     .combine(ee.Reducer.mean().unweighted().forEachBand(pixOut.select(['clouds'])), 'cScore_', False))
          
-    #Look into combined reducer, shared input set to false. Get rid of joiner.    
-    
     
     # Collect median reflectance and occurance values
     # Make a cloud score, and get the water pixel count

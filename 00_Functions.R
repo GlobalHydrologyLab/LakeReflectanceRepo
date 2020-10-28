@@ -73,39 +73,36 @@ correctionPlot <- function(band, sat, dataPre, dataPost){
     #labs(y = paste0(capitalize(sat), " SR"), x = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction"))
 }
   
- 
 
-ggplot(tibble(x = runif(10,1,1000), y = runif(10,1,1000)), aes(x, y)) + geom_point()+
-  scale_x_continuous(trans = 'log10') +
-  scale_y_continuous(trans = 'log10') +
-  annotate('text', x = Inf, y = Inf, vjust = 5, hjust = 20, label = c('test', 'Now'))
+## Code for connnecting dWL to forel-ule index 
+fui.lookup <- tibble(dWL = c(471:583), fui = NA)
 
-## Old Correction plot function
-# correctionPlot <- function(band, sat){
-#   if(sat == 'l8'){
-#     x <- refCompPre %>% filter(year > 2012)
-#   }else if(sat == 'l5'){
-#     x <- refCompPre %>% filter(year > 1999, year < 2012)
-#   }
-#   max.x <- max(x[,band])
-#   df <- tibble(y = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
-#                             seq(.01,.99, .01)), 
-#                x = quantile(x %>% filter(sat == sat) %>% .[,band], 
-#                             seq(.01,.99, .01)))
-#   lm <- lm(y~poly(x, 2), data = df)
-#   r2 <- summary(lm)$adj.r.squared %>% round(4)
-#   
-#   df <- df %>% bind_cols(Corrected = lm$fitted.values) %>%
-#     gather(x, Corrected, key = 'Reflectance', value = x) %>%
-#     mutate(Reflectance = ifelse(Reflectance == 'x', 'Original', Reflectance))
-#   
-#   
-#   ggplot(df, aes(x = x, y = y, color = Reflectance)) + geom_point(alpha = .5) + 
-#     geom_abline(color = 'red') + 
-#     annotate('text', label = paste0("italic(R)^2 ==", r2), parse = T, x = -Inf, y = Inf, vjust = 1.2, hjust = -.2) +
-#     scale_color_viridis_d(begin = .2, end = .8) +
-#     theme_bw() +
-#     #scale_y_continuous(sec.axis = sec_axis(~.*(100/max.x), name = 'Quantile')) + 
-#     labs(x = paste0(capitalize(sat), " SR"), y = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction")) +
-#     labs(title = paste0(capitalize(band))) 
-# }
+fui.lookup$fui[fui.lookup$dWL <= 583] = 21
+fui.lookup$fui[fui.lookup$dWL <= 581] = 20
+fui.lookup$fui[fui.lookup$dWL <= 579] = 19
+fui.lookup$fui[fui.lookup$dWL <= 577] = 18
+fui.lookup$fui[fui.lookup$dWL <= 575] = 17
+fui.lookup$fui[fui.lookup$dWL <= 573] = 16
+fui.lookup$fui[fui.lookup$dWL <= 571] = 15
+fui.lookup$fui[fui.lookup$dWL <= 570] = 14
+fui.lookup$fui[fui.lookup$dWL <= 569] = 13
+fui.lookup$fui[fui.lookup$dWL <= 568] = 12
+fui.lookup$fui[fui.lookup$dWL <= 567] = 11
+fui.lookup$fui[fui.lookup$dWL <= 564] = 10
+fui.lookup$fui[fui.lookup$dWL <= 559] = 9
+fui.lookup$fui[fui.lookup$dWL <= 549] = 8
+fui.lookup$fui[fui.lookup$dWL <= 530] = 7
+fui.lookup$fui[fui.lookup$dWL <= 509] = 6
+fui.lookup$fui[fui.lookup$dWL <= 495] = 5
+fui.lookup$fui[fui.lookup$dWL <= 489] = 4
+fui.lookup$fui[fui.lookup$dWL <= 485] = 3
+fui.lookup$fui[fui.lookup$dWL <= 480] = 2
+fui.lookup$fui[fui.lookup$dWL <= 475 & fui.lookup$dWL >470] = 1
+
+
+# Actual Forel-Ule Colors
+fui.colors <- c(
+  "#2158bc", "#316dc5", "#327cbb", "#4b80a0", "#568f96", "#6d9298", "#698c86", 
+  "#759e72", "#7ba654", "#7dae38", "#94b660","#94b660", "#a5bc76", "#aab86d", 
+  "#adb55f", "#a8a965", "#ae9f5c", "#b3a053", "#af8a44", "#a46905", "#9f4d04")
+
