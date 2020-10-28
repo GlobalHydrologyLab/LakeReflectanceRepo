@@ -19,13 +19,13 @@ library(ggpmisc)
 library(ggpubr)
 library(Hmisc)
 
-source('00_Functions.R')
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## Read in the data and aggregate some initial stats to see how many observations
 
 ```{r eval = F}
+## Read in whatever path you saved the raw pull data to
 files <- list.files('data/raw', full.names = T)
 files <- files[file.size(files) > 1] ## 6 WRS tile returned no values
 
@@ -86,7 +86,6 @@ munged <- files %>% future_map_dfr(munger, .progress = T)
 plan(sequential)
 
 ## Save the output
-write_csv(munged, 'data/sr_us_hydrolakes_dp_20200628.csv')
 write_feather(munged, 'data/sr_us_hydrolakes_dp_20200628.feather')
 ```
 
@@ -111,16 +110,13 @@ ggplot(summary, aes(x = N)) +
 
 
 ##Spatial Distribution and count
+## Hydrolakes shapefile available at https://www.hydrosheds.org/pages/hydrolakes
+## dp shapefile available in LimnoSat-US repository (DOI 10.5281/zenodo.4139695)
 dp <- st_read('data/in/HydroLakes_DP/HydroLakes_DP.shp')
 
 hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
   filter(Hylak_id %in% dp$Hylak_id) %>%
   st_centroid()
-
-## Check out many lakes there are vs what we have after munging
-# check <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
-#   filter(Country == "United States of America") %>%
-#   st_join(usa %>% st_transform(4326), left = F)
 
 summary.sf <- summary %>% inner_join(hl) %>% st_as_sf() %>% st_transform(102003) 
 
@@ -133,7 +129,7 @@ counts.sf <- grid %>% st_join(summary.sf, left = F) %>%
   summarise(sumLakes = n(),
             meanObs = median(N))
 
-## Temporal Distributoni
+## Temporal Distribution
 tempDist <- as.data.table(munged)[, year := year(date)
                ][, month := month(date)
                  ][,.N, by = .(year, month)
@@ -189,29 +185,27 @@ layout <- rbind(c(2,3),
 g <- gridExtra::grid.arrange(p3,p1,p2, layout_matrix = layout)
 
 ggsave('figures/ObsDistribution.png', plot = g, width = 7, units = 'in', dpi = 300)
-
 ```
 
 # After munging, we have  a mean of `r postMungeMean` observations and median of `r postMungeMed` observations per lake in hydrolakes.  Now join the data to the metadata and look at potential biases between sensors.
 
 ```{r}
+## Metadata code available at
+##https://code.earthengine.google.com/561b310819705b739ca740f9c6a231e9
 meta <- read_csv('data/SceneMetadata.csv')
 meta <- meta %>% rename(LandsatID = `system:index`)
 
 refCompPre <- munged %>%
-  left_join(meta %>% select(LandsatID, sat = SATELLITE)) %>%
-  select(LandsatID, Hylak_id, date, Blue, Red, Green, Nir, TIR1, sat, pCount_dswe1, pCount_dswe3) 
+  left_join(meta %>% select(LandsatID, sat = SATELLITE, Clouds_Scene = CLOUD_COVER)) %>%
+  select(LandsatID, Hylak_id, date, Aerosol, Blue, Red, Green, Nir, Swir1, Swir2, TIR1, TIR2, sat, pCount_dswe1, pCount_dswe3) 
 
 refCompPre <- as.data.table(refCompPre)[, year := year(date)
-               ][, week := week(date)
-                 ][, month := month(date)
-                   ][,period :=cut(year, 6)
-                    ][,dWLPre := fui.hue(Red, Green, Blue)
-                     ][,sat := factor(sat, levels = c('LANDSAT_5','LANDSAT_7','LANDSAT_8'),
+               ][,sat := factor(sat, levels = c('LANDSAT_5','LANDSAT_7','LANDSAT_8'),
                       labels = c('l5','l7','l8'))]
 
 
-refCompPre <- refCompPre %>% sample_frac(.2)
+## Create polynomial functions based on the 1-99th percentile of each sensor
+## for overlapping periods
 
 lm8 <- function(band){
   y <- refCompPre %>% 
@@ -251,18 +245,16 @@ lm5 <- function(band){
 
 
 ## Create the functions and look at the resulting corrections
-bands <-  c('Blue', 'Green', 'Nir', 'Red', 'TIR1')
+bands <-  c('Blue', 'Green', 'Nir', 'Red', 'Swir1','Swir2', 'TIR1')
 funcs.8 <- bands %>% map_dfr(lm8)
 funcs.5 <- bands %>% map_dfr(lm5)
-# 
-# funcs.5 <- bands %>%
-#   mutate(lm5 = purrr::map(band, lm5, x = refCompPre))
+
 
 funcs.5 %>% mutate(SatCor = 'l5') %>%
   bind_rows(funcs.8 %>% mutate(SatCor = 'l8')) %>%
   write_feather(.,'data/out/landsat_correction_coefficients.feather')
 
-#write_feather(refCompPre, 'data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
+write_feather(refCompPre, 'data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
 ```
 
 ## We know from previous work that even minor differences between sensors can translate to meaningful differences in dominant wavelength, so we'll apply the above corrections to the entire dataset
@@ -281,7 +273,13 @@ l5corr <- refCompPre[sat == 'l5'
                           ][,Red := funcs.5[4,2][[1]] + 
                              funcs.5[4,3][[1]]*Red + 
                              funcs.5[4,4][[1]]*Red^2
-                          ][,TIR1 := funcs.5[5,2][[1]] + 
+                          ][,Swir1 := funcs.5[5,2][[1]] +
+                              funcs.5[5,3][[1]]*Swir1 +
+                              funcs.5[5,4][[1]]*Swir1^2
+                            ][,Swir2 := funcs.5[6,2][[1]] +
+                              funcs.5[6,3][[1]]*Swir2 +
+                              funcs.5[6,4][[1]]*Swir2^2
+                            ][,TIR1 := funcs.5[5,2][[1]] + 
                              funcs.5[5,3][[1]]*TIR1 + 
                              funcs.5[5,4][[1]]*TIR1^2]
 
@@ -298,7 +296,13 @@ l8corr <- refCompPre[sat == 'l8'
                           ][,Red := funcs.8[4,2][[1]] + 
                              funcs.8[4,3][[1]]*Red + 
                              funcs.8[4,4][[1]]*Red^2
-                          ][,TIR1 := funcs.8[5,2][[1]] + 
+                          ][,Swir1 := funcs.8[5,2][[1]] +
+                              funcs.8[5,3][[1]]*Swir1 +
+                              funcs.8[5,4][[1]]*Swir1^2
+                            ][,Swir2 := funcs.8[6,2][[1]] +
+                              funcs.8[6,3][[1]]*Swir2 +
+                              funcs.8[6,4][[1]]*Swir2^2
+                              ][,TIR1 := funcs.8[5,2][[1]] + 
                              funcs.8[5,3][[1]]*TIR1 + 
                              funcs.8[5,4][[1]]*TIR1^2]
 
@@ -310,13 +314,58 @@ srCor <- refCompPre %>%
 rm(l5corr, l8corr)
 
 srCor <- as.data.table(srCor)[,dWL := fui.hue(Red, Green, Blue)]
-#write_feather(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+write_feather(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+write_csv(srCor, 'data/processed/srCorrected_us_hydrolakes_dp_20200628.csv')
 ```
 
 
+## Make a function for comparing corrected vs uncorrected values
+
 ```{r}
-srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
-refCompPre <- read_feather('data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
+correctionPlot <- function(band, sat, dataPre, dataPost){
+  if(sat == 'l8'){
+
+    df <- tibble(l7 = quantile(dataPost[sat == 'l7' & year > 2012, ..band
+                           ][[1]], seq(.01,.99,.01)),
+    Original = quantile(dataPre[sat == sat & year > 2012, ..band
+                                 ][[1]], seq(.01,.99,.01)),
+    PostCorrection = quantile(dataPost[sat == sat & year > 2012, ..band
+                                       ][[1]], seq(.01,.99,.01)))
+  }else if(sat == 'l5'){
+
+    df <- tibble(l7 = quantile(dataPost[sat == 'l7' & year < 2012 & year > 1999, ..band
+                           ][[1]], seq(.01,.99,.01)),
+    Original = quantile(dataPre[sat == sat & year < 2012 & year > 1999, ..band
+                                ][[1]], seq(.01,.99,.01)),
+    PostCorrection = quantile(dataPost[sat == sat & year < 2012 & year > 1999, ..band
+                                       ][[1]], seq(.01,.99,.01)))
+  }
+  
+  ogBias <- round(Metrics::bias(df$l7, df$Original), 3)
+  CBias <- round(Metrics::bias(df$l7, df$PostCorrection), 3)
+  
+  df <- df %>% gather(Original, PostCorrection, key = "Correction", value = 'Reflectance')
+  
+  ggplot(df, aes(x = l7, y = Reflectance, color = Correction)) + geom_point(alpha = .8) + 
+    geom_abline(color = 'red') + 
+    scale_color_viridis_d(end = .7, labels = c('Original', 'Post\nCorrection')) +
+    #stat_regline_equation(aes(label =  paste(..adj.rr.label..))) +
+    annotate('text', x= Inf, y = Inf, vjust = 3.8, hjust = 1, 
+             label = paste0('Original Bias: ', ogBias,'\nCorrected Bias: ', CBias)) +
+    theme_bw() +
+    theme(axis.title = element_blank()) +
+    scale_y_continuous(trans = 'log10') +
+    scale_x_continuous(trans = 'log10') +
+    labs(title = capitalize(band))
+}
+```
+
+
+## Plot up some examples
+
+```{r}
+#srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
+#refCompPre <- read_feather('data/processed/srMunged_Original_us_hydrolakes_dp_20200628.feather')
 
 srCor <- as.data.table(srCor)
 refCompPre <- as.data.table(refCompPre)
@@ -366,7 +415,7 @@ gridSummary <- grid %>% st_join(srCorSummary.sf, left = F) %>%
 #Visualize the Deepest point for a figure
 
 ```{r}
-
+#Available from https://www.hydrosheds.org/pages/hydrolakes
 hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/HydroLAKES_polys_v10.shp') %>%
   filter(Hylak_id %in% dp$Hylak_id) 
 
@@ -404,7 +453,4 @@ hl_poly <- hl %>% filter(Hylak_id %in% hl_sample$Hylak_id) %>% st_transform(1020
   
 mapview(dpBuff, zcol = 'Measurement', color = 'grey60', col.regions = c('cyan','magenta'), layer.name = 'Sample Point and Associated\nDistance to Nearest Shore') + 
   mapview(dpSamp, zcol = 'Measurement',layer.name = 'Sample Point', color = 'black', col.regions = c('cyan','magenta')) + mapview(hl_poly, col.regions = 'black', layer.name = 'Lake Polygon')
-
-
 ```
-

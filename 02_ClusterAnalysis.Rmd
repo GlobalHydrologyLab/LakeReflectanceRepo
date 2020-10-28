@@ -18,18 +18,18 @@ library(sf)
 library(dtwclust)
 library(networkD3)
 library(tictoc)
+
+source('00_Functions.R')
 knitr::opts_chunk$set(echo = TRUE)
 ```
-## Try pulling out the smoothed trend lines using doy for each period
+
+## Pull in the LimnoSat-US database, HydroLakes, and the deepest points shapefile
 
 ```{r}
+## LimnoSat database available at https://zenodo.org/record/4139695#.X5mCDIhKhhE
 srCor <- read_feather('data/processed/srCorrected_us_hydrolakes_dp_20200628.feather')
 
 iterations = 'May_Oct'
-## Play around with some clustering
-
-## Take a representative sample of HydroLakes
-Ecoregs <- st_read('../USLakeClarityTrendr/in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 
 dp <- st_read('data/in/HydroLakes_DP/HydroLakes_DP.shp')
 
@@ -40,18 +40,14 @@ hl <- st_read('../USLakeClarityTrendr/in/hydroLakes/HydroLAKES_polys_v10_shp/Hyd
 
 srCor <- as.data.table(srCor)[,period := cut(year,6, dig.lab = 4)
                                 ][,doy := yday(date)
-                                  ][, week := ifelse(week  == 53,52,week)
-                                    ][,biWeek := ifelse(week %% 2 == 0,
-                                                         week, week + 1)]
+                                  ][, month := month(date)
+                                    ]
 
 ```
 
+## Filter the database down to only those lakes with enough summer obs per period for clustering
 
 ```{r}
-##  Take a look at biWeek distributions to decide cut-off's for 'Summer'
-#hist(srCor$biWeek)
-#Looks like it should be ~18 and 38, or ~May-Oct
-#summary(factor(srCor$biWeek))
 
 FilterCounts <- srCor[month %in% c(5:10)
                       ][, .N, by = .(Hylak_id, period, month)]
@@ -140,13 +136,6 @@ smoothed.raw.var <- smoothed.raw %>%
             dWL = as.integer(mean(dWL))) %>%
   left_join(fui.lookup)
 
-quantile(smoothed.raw.var$dWL, 0.01)
-quantile(smoothed.raw.var$dWL, 0.99)
-
-end.members <- smoothed.raw.var %>% filter(dWL < 488 | dWL > 574)
-nrow(end.members %>% filter(sd <= 5))/nrow(end.members)
-nrow(smoothed.raw.var %>% filter(sd <= 5))/nrow(smoothed.raw.var)
-hist(end.members$sd)
 
 smoothed.raw.var %>%
   ggplot() + 
@@ -164,16 +153,15 @@ aseasonal = smoothed.raw.var %>%
   filter(sd <= 5) %>%
   mutate(lpID = paste0(Hylak_id, period))
 
-## Check which of our example timeseries were classified as aseasonal
-aseasonal %>% filter(Hylak_id %in% vis.samp$Hylak_id) %>% left_join(vis.samp)
 ```
 
+## Visualize our resulting timeseries a little bit.
 
 ```{r}
 smoothed.norm <- read_feather(paste0('data/out/',iterations,'_Wide_Normalized.feather'))
 smoothed.raw <- read_feather(paste0('data/out/',iterations,'_Wide_Raw.feather'))
 
-## Version to of figure using known lakes
+## Select some well studied lakes as examples
 vis.samp <- tibble(LakeName = c('Mendota (WI)', 'Okeechobee (FL)', 'Crater (OR)'), Hylak_id = c(9086, 69, 9092))
 # Lake name, Hylak_id
 # Trout lake, 8736
@@ -182,12 +170,9 @@ vis.samp <- tibble(LakeName = c('Mendota (WI)', 'Okeechobee (FL)', 'Crater (OR)'
 # Tahoe, 792
 # Crater, 9092
 
-# Look at de-meaned but not scaled results
+
 vis.raw <- smoothed.raw %>% filter(Hylak_id %in% vis.samp$Hylak_id) %>%
   pivot_longer(-c(Hylak_id, period), names_to = 'doy', values_to = 'dWL') %>%
-  #group_by(Hylak_id, period) %>%
-  #mutate(dWL = scale(dWL, scale = F)) %>%
-  #ungroup() %>%
   mutate(doy = as.numeric(doy)) %>%
   left_join(vis.samp)
 
@@ -214,10 +199,6 @@ ggplot(vis.raw, aes(x = doy)) +
              aes(color = fui, y = dWL, fill = 'Landsat Observed Color')) +
   geom_line(size = 1, aes(y = dWL, shape = 'Kmeans Climatology'),color = 'red', show.legend = T) +
   scale_color_gradientn(colors = c(fui.colors), guide = 'none') +
-  # scale_color_identity(guide = 'legend',
-  #                      name = '',
-  #                      breaks = c('black', 'red'),
-  #                      labels = c('Observed Color','Kmeans Climatology')) +
   theme_bw() +
   coord_cartesian(ylim = c(450,600)) +
   theme(legend.position = 'top', legend.title = element_blank()) +
@@ -233,10 +214,6 @@ ggplot(vis.norm, aes(x = doy)) +
              aes(color = fui, y = dWL.scaled, fill = 'Landsat Observed Color')) +
   geom_line(size = 1, aes(y = dWL, shape = 'Kmeans Climatology'),color = 'red', show.legend = T) +
   scale_color_gradientn(colors = c(fui.colors), guide = 'none') +
-  # scale_color_identity(guide = 'legend',
-  #                      name = '',
-  #                      breaks = c('black', 'red'),
-  #                      labels = c('Observed Color','Kmeans Climatology')) +
   theme_bw() +
   coord_cartesian(ylim = c(-2,2)) +
   theme(legend.position = 'top', legend.title = element_blank()) +
@@ -325,7 +302,7 @@ cluster@centroids %>% as_tibble(.name_repair = "universal") %>% mutate(doy = seq
   pivot_longer(-doy, names_to = 'cluster') %>%
   ggplot() + geom_line(aes(x = doy, y = value)) + facet_wrap(~cluster)
 
-
+# Specify that we're saving clusters with a priori aseasonal component
 iterations <- 'May_Oct_Aseas'
 save(cluster, cvi_df, file = paste0('data/out/',iterations,'_SummerClusterings.RData'))
 rm(cluster_dtw, cvi_names, cvi_dw, cvi.selects, cvi_df)
@@ -367,7 +344,6 @@ dtw_wrapper <- function(bootsrapped){
   
   relabler <- table(labels.og, labels.new) %>% 
     as_tibble() %>% 
-    #mutate(frac = ifelse(labels.og == 1, n/23578, ifelse(labels.og == 2, n/40504, n/45561))) %>% 
     arrange(-n) 
     
   relabled <- relabler[1,] 
